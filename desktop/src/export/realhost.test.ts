@@ -20,10 +20,11 @@ import { filePixels } from './exporter';
 
 const dir = process.env.SPEKTRALAB_HOST_DIR;
 const raw = process.env.SPEKTRALAB_TEST_RAW;
-const enabled = !!dir && !!raw && existsSync(join(dir, 'spektralab-host'));
+const hostName = process.platform === 'win32' ? 'spektralab-host.exe' : 'spektralab-host';
+const enabled = !!dir && !!raw && existsSync(join(dir, hostName));
 
 function hostConn(d: string) {
-  const p = spawn(join(d, 'spektralab-host'), ['--resources', join(d, 'engine')], { stdio: ['pipe', 'pipe', 'inherit'] });
+  const p = spawn(join(d, hostName), ['--resources', join(d, 'engine')], { stdio: ['pipe', 'pipe', 'inherit'] });
   const dec = new FrameDecoder();
   const waiting = new Map<number, (r: { header: Record<string, unknown>; payload: Uint8Array }) => void>();
   p.stdout!.on('data', (c: Buffer) => {
@@ -51,7 +52,11 @@ describe.skipIf(!enabled)('the real host', () => {
     try {
       const hello = await h.call('hello', {});
       expect((hello.header.result as { methods: string[] }).methods).toContain('write_image');
-      const open = await h.call('open', { path: raw, params: { preview_long_edge: 800 } });
+      const open = await h.call('open', { path: raw, params: {
+        preview_long_edge: 800, grain_active: false, glare_active: false,
+        scene_latitude_active: true, scene_latitude_highlight_room: 1, scene_latitude_shadow_room: 1,
+        contrast_mask_active: true, contrast_mask_highlights: 1, contrast_mask_shadows: 1,
+      } });
       expect(open.header.ok, JSON.stringify(open.header.error)).toBe(true);
       const sid = (open.header.result as { session: string }).session;
       const r = await h.call('render', { session: sid, tier: 'live', format: 'rgba16', display: 'prophoto' });

@@ -34,6 +34,11 @@ export interface RenderReply extends RgbaImage {
   ms: number;
 }
 
+export interface WhiteBalancePickReply {
+  temperature_k: number;
+  tint: number;
+}
+
 function rgba8(info: ImageInfo, payload: Uint8Array): RgbaImage {
   if (info.format !== 'rgba8') throw new HostCallError('render', 'bad_request', `expected rgba8, got ${info.format}`);
   const tight = info.width * 4;
@@ -96,6 +101,9 @@ export class Host {
   /** Decode the session's file again with other decode settings; params are kept (R2). */
   async redecode(session: string, decode: object): Promise<OpenResult> {
     return (await this.call<OpenResult>('redecode', { session, decode }, 300_000)).result;
+  }
+  async whiteBalancePick(session: string, x: number, y: number): Promise<WhiteBalancePickReply> {
+    return (await this.call<WhiteBalancePickReply>('white_balance_pick', { session, x, y })).result;
   }
   async close(session: string): Promise<void> {
     await this.call('close', { session });

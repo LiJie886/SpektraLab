@@ -8,7 +8,7 @@
 
 import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { ChevronLeft, ChevronRight } from '../controls/icons';
-import { click, selectRelative, useSession } from '../state/session';
+import { click, reorderFrames, selectRelative, useSession } from '../state/session';
 import { thumbs } from '../state/thumbs';
 import { type Geometry, GEOMETRY_DEFAULT } from '@shared/geometry';
 import { thumbnailGeometryPlan } from '@shared/surfaces';
@@ -26,6 +26,8 @@ export function Filmstrip() {
     () => thumbVersion(),
   );
   const strip = useRef<HTMLDivElement>(null);
+  const pointerDrag = useRef<{ id: number; source: string; x: number; y: number; active: boolean } | null>(null);
+  const suppressClick = useRef(false);
   useEffect(() => {
     const el = strip.current?.querySelector('.thumb.open');
     el?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
@@ -41,9 +43,38 @@ export function Filmstrip() {
           <div
             key={f.path}
             className={'thumb' + (f.path === selection ? ' open' : '') + (picked.includes(f.path) ? ' picked' : '')}
-            onClick={(e) => click(f.path, e.ctrlKey || e.metaKey)}
+            onClick={(e) => {
+              if (suppressClick.current) { suppressClick.current = false; return; }
+              click(f.path, e.ctrlKey || e.metaKey);
+            }}
             title={f.name}
             data-path={f.path}
+            onPointerDown={(e) => {
+              if (batch || e.button !== 0) return;
+              pointerDrag.current = { id: e.pointerId, source: f.path, x: e.clientX, y: e.clientY, active: false };
+              e.currentTarget.setPointerCapture(e.pointerId);
+            }}
+            onPointerMove={(e) => {
+              const drag = pointerDrag.current;
+              if (!drag || drag.id !== e.pointerId) return;
+              if (!drag.active && Math.hypot(e.clientX - drag.x, e.clientY - drag.y) < 6) return;
+              drag.active = true;
+              e.preventDefault();
+              suppressClick.current = true;
+              const target = document.elementFromPoint(e.clientX, e.clientY)?.closest<HTMLElement>('.thumb[data-path]');
+              const path = target?.dataset.path;
+              if (path && strip.current?.contains(target)) reorderFrames(drag.source, path);
+            }}
+            onPointerUp={(e) => {
+              if (pointerDrag.current?.id !== e.pointerId) return;
+              const wasDrag = pointerDrag.current.active;
+              pointerDrag.current = null;
+              if (wasDrag) window.setTimeout(() => { suppressClick.current = false; }, 0);
+            }}
+            onPointerCancel={() => {
+              pointerDrag.current = null;
+              window.setTimeout(() => { suppressClick.current = false; }, 0);
+            }}
           >
             <Thumb path={f.path} geometry={f.path === selection ? live : (saved[f.path] ?? GEOMETRY_DEFAULT)} />
             <span className="thumb-name">{f.name}</span>

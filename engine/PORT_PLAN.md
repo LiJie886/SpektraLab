@@ -1,5 +1,11 @@
 # Porting the five refused features to Vulkan -- a handoff
 
+**2026-10-28:** §§2 and 3 are implemented in this working tree, including
+Vulkan numerical gates and Tauri controls. The remaining refusals are Cineon
+DI, overscan and date imprint. The estimates and scope decision below describe
+the original handoff. Current validation is in
+[`desktop/docs/windows-feature-update.md`](../desktop/docs/windows-feature-update.md).
+
 **Status (owner's decision, 2026-10-06):** contrast mask, scene latitude
 mapping, Cineon Digital Intermediate, overscan/film edge and the date back
 stay **refused** off Apple. `capabilities.backend.unsupported_features` lists

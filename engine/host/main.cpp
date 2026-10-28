@@ -137,6 +137,7 @@ struct Session {
     uint32_t width = 0, height = 0;
     Metadata metadata;
     std::string output_space = "ProPhoto RGB";
+    DecodeOptions decode;
 };
 
 struct State {
@@ -365,7 +366,7 @@ Json m_hello(const Request&) {
     r.set("capabilities", std::move(caps));
     Json methods = Json::array();
     for (const char* m : {"hello", "ping", "shutdown", "params_schema", "print_lut_catalog", "memory_report",
-                          "probe", "thumbnail", "open", "redecode", "close", "set_params", "get_params", "solve", "render",
+                          "probe", "thumbnail", "open", "redecode", "white_balance_pick", "close", "set_params", "get_params", "solve", "render",
                           "scene_latitude", "overscan_geometry", "preview_stock_lut", "cancel", "progress",
                           "export_image", "export_cube", "export_di", "write_image"})
         methods.push(str(m));
@@ -518,6 +519,7 @@ Json m_open(const Request& q) {
     s->height = d.frame.height;
     s->metadata = d.probe.metadata;
     s->output_space = output_space_of(opened.at("params"));
+    s->decode = options;
     {
         std::lock_guard<std::mutex> lock(g.sessions_mutex);
         s->id = "s" + std::to_string(g.next_session++);
@@ -554,10 +556,33 @@ Json m_redecode(const Request& q) {
     s->height = d.frame.height;
     s->metadata = d.probe.metadata;
     s->output_space = output_space_of(opened.at("params"));
+    s->decode = options;
     return open_reply(*s, d, opened, open_ms);
 }
 
-Json m_close(const Request& q) {
+Json m_white_balance_pick(const Request &q) {
+    auto s = find_session(q.params);
+    if (s->decode.raw_mode == "headroom")
+        throw HostError{"unsupported",
+                        "white balance picking is unavailable for headroom RAW decode"};
+    if (sniff_kind(utf8_path(s->path)) != FileKind::Raw)
+        throw HostError{"unsupported", "white balance picking is available for RAW files only"};
+    const double x = q.params.at("x").as_double(-1), y = q.params.at("y").as_double(-1);
+    double t = 0, tint = 0;
+    std::string error;
+    if (!pick_raw_white_balance(utf8_path(s->path), s->metadata.orientation, x, y, t, tint,
+                                error)) {
+        if (error.rfind("unsupported: ", 0) == 0)
+            throw HostError{"unsupported", error.substr(13)};
+        throw HostError{"bad_request", error};
+    }
+    Json r = Json::object();
+    r.set("temperature_k", number(t));
+    r.set("tint", number(tint));
+    return r;
+}
+
+Json m_close(const Request &q) {
     std::shared_ptr<Session> s;
     {
         std::lock_guard<std::mutex> lock(g.sessions_mutex);
@@ -902,6 +927,7 @@ void dispatch(const Request& q) {
     else if (m == "open") result = m_open(q);
     else if (m == "close") result = m_close(q);
     else if (m == "redecode") result = m_redecode(q);
+    else if (m == "white_balance_pick") result = m_white_balance_pick(q);
     else if (m == "set_params") result = m_set_params(q);
     else if (m == "get_params") result = m_get_params(q);
     else if (m == "solve") result = m_solve(q);

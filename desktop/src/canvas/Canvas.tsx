@@ -37,6 +37,7 @@ import {
   setGeometry,
   setOriginal,
   setView,
+  sampleWhiteBalance,
   useSession,
 } from '../state/session';
 import { HistogramOverlay, histogramOf, type Histogram } from './histogram';
@@ -105,6 +106,7 @@ export function Canvas() {
   const badge = useSession((s) => s.badge);
   const selection = useSession((s) => s.selection);
   const batch = useSession((s) => s.batchExporting);
+  const whiteBalancePicking = useSession((s) => s.whiteBalancePicking);
   const exportOpen = useSession((s) => s.exportOpen);
   const cropping = tool === 'crop';
 
@@ -271,6 +273,16 @@ export function Canvas() {
   const onPointerDown = (e: React.PointerEvent) => {
     if (!layout || batch) return;
     (e.target as Element).setPointerCapture?.(e.pointerId);
+    if (whiteBalancePicking && e.button === 0 && wrap.current) {
+      const rect = wrap.current.getBoundingClientRect();
+      const px = (e.clientX - rect.left) * size.dpr;
+      const py = (e.clientY - rect.top) * size.dpr;
+      const output = { x: (px - layout.offset.x) / layout.outSize.width, y: (py - layout.offset.y) / layout.outSize.height };
+      if (output.x < 0 || output.x > 1 || output.y < 0 || output.y > 1) return;
+      const source = sourcePoint(layout.display, output, layout.native);
+      if (source.x >= 0 && source.x <= 1 && source.y >= 0 && source.y <= 1) void sampleWhiteBalance(source.x, source.y);
+      return;
+    }
     if (cropping && e.button === 0) {
       const s = toSource(e.clientX, e.clientY);
       if (!s) return;
@@ -354,7 +366,7 @@ export function Canvas() {
     };
   }, []);
 
-  const cursor = cropping ? 'crosshair' : tool === 'hand' ? 'grab' : 'default';
+  const cursor = whiteBalancePicking || cropping ? 'crosshair' : tool === 'hand' ? 'grab' : 'default';
   const css = (v: number) => v / size.dpr;
 
   return (

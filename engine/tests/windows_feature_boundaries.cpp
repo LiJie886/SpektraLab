@@ -2,6 +2,7 @@
 #include "spektrafilm/spk_engine.h"
 
 #include <array>
+#include <cmath>
 #include <iostream>
 #include <memory>
 #include <stdexcept>
@@ -54,10 +55,8 @@ int main(int argc, char** argv) {
         const std::string before = params(session.get());
 
         struct Feature { const char* key; const char* label; };
-        const std::array<Feature, 5> features{{
+        const std::array<Feature, 3> features{{
             {"digital_intermediate", "digital intermediate"},
-            {"scene_latitude_active", "scene latitude mapping"},
-            {"contrast_mask_active", "contrast mask"},
             {"overscan_active", "overscan"},
             {"date_imprint_active", "date imprint"},
         }};
@@ -99,8 +98,7 @@ int main(int argc, char** argv) {
         require(spk_contrast_mask_field(session.get(), "full", &mask, &width, &height) == SPK_OK &&
                 !mask && width == 0 && height == 0, "disabled contrast mask must have an empty field");
 
-        // Latitude analysis uses the existing pipeline; only applying its
-        // mapping is unported. This also exercises probe_medium's readback.
+        // Analysis must remain read-only, even now that its curve can render.
         char* latitude_json = nullptr;
         const spk_status latitude_status = spk_scene_latitude(session.get(), nullptr, &latitude_json);
         const std::string latitude_error = spk_last_error(engine.get());
@@ -111,7 +109,51 @@ int main(int argc, char** argv) {
         require(latitude_status == SPK_OK && latitude_valid, "latitude analysis failed: " + latitude_error);
         require(params(session.get()) == before, "latitude analysis mutated the session");
         render(engine.get(), session.get());
-        std::cout << "Windows feature boundaries passed (5 flags, DI refusal, mask off, latitude analysis)\n";
+        // A wide neutral ramp makes both tone features observable. Compare
+        // identical deterministic inputs so random grain cannot hide a no-op.
+        for (size_t i = 0; i < pixels.size() / 3; ++i) {
+            const float v = float(0.0002 * std::pow(2.0, double(i % 32) / 2.0));
+            pixels[3 * i] = v; pixels[3 * i + 1] = v; pixels[3 * i + 2] = v;
+        }
+        const char* deterministic = R"({"film_stock":"kodak_portra_400","print_stock":"kodak_portra_endura","input_color_space":"ProPhoto RGB","input_cctf_decoding":false,"grain_active":false,"glare_active":false,"auto_exposure":false})";
+        std::unique_ptr<spk_session, decltype(&spk_session_release)> tones(
+            spk_open(engine.get(), &input, deterministic, nullptr), spk_session_release);
+        require(bool(tones), "tone session open failed");
+        auto pixels_of = [&](bool reprint, int expected_cache) {
+            spk_result result{};
+            const auto status = reprint ? spk_reprint(tones.get(), "full", &result) : spk_render(tones.get(), "full", &result);
+            const std::string error = spk_last_error(engine.get());
+            std::vector<uint16_t> copy;
+            if (status == SPK_OK && result.rgba16) {
+                for (uint32_t y = 0; y < result.height; ++y)
+                    copy.insert(copy.end(), result.rgba16 + size_t(y) * result.row_stride_px * 4,
+                                result.rgba16 + (size_t(y) * result.row_stride_px + result.width) * 4);
+            }
+            const bool cached = result.negative_was_cached != 0;
+            spk_result_free(&result);
+            require(status == SPK_OK && !copy.empty(), "tone render failed: " + error);
+            require(expected_cache < 0 || cached == bool(expected_cache), "incorrect tone negative-cache invalidation");
+            return copy;
+        };
+        auto edit = [&](const char* delta) {
+            const auto status = spk_set_params(tones.get(), delta, nullptr);
+            require(status == SPK_OK, std::string("tone parameters refused: ") + spk_last_error(engine.get()));
+        };
+        const auto baseline = pixels_of(false, 0);
+        edit(R"({"scene_latitude_active":true,"scene_latitude_highlight_knee":1,"scene_latitude_highlight_room":1,"scene_latitude_shadow_knee":-1,"scene_latitude_shadow_room":1})");
+        const auto placed = pixels_of(false, 0);
+        require(placed != baseline, "scene placement rendered no change");
+        edit(R"({"scene_latitude_active":false})");
+        require(pixels_of(false, 0) == baseline, "scene placement bypass changed default pixels");
+        edit(R"({"contrast_mask_active":true,"contrast_mask_highlights":1,"contrast_mask_shadows":1,"contrast_mask_core":0.5})");
+        const auto masked = pixels_of(true, 1);
+        require(masked != baseline, "contrast mask rendered no change");
+        require(spk_contrast_mask_field(tones.get(), "full", &mask, &width, &height) == SPK_OK && mask && width && height,
+                "enabled contrast mask has no analysis field");
+        require(pixels_of(true, 1) == masked, "mask analysis changed the next print");
+        edit(R"({"contrast_mask_active":false})");
+        require(pixels_of(true, 1) == baseline, "contrast mask bypass changed default pixels");
+        std::cout << "Windows feature boundaries passed (3 refusals, latitude mapping, contrast mask, cache and bypass)\n";
         return 0;
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';

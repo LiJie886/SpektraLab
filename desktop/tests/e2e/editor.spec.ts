@@ -1,6 +1,7 @@
 // Layout and behaviour of the editor against the in-page mock host.
 
 import { expect, test, type Page } from '@playwright/test';
+import { outputSize, sourcePoint } from '../../src/shared/geometry';
 
 async function openRoll(page: Page) {
   await page.goto('/?open=');
@@ -52,6 +53,80 @@ test('a quarter turn swaps the output size readout', async ({ page }) => {
   const after = await page.getByTestId('crop-size').textContent();
   const [w, h] = before!.split(' · ')[0]!.split(' × ');
   expect(after!.startsWith(`${h} × ${w}`)).toBe(true);
+});
+
+test('filmstrip pointer drag reorders frames without changing selection or picked set', async ({ page }) => {
+  await openRoll(page);
+  const before = await state(page, '({ frames:s.frames.map(f=>f.path), selection:s.selection, picked:[...s.picked] })') as { frames: string[]; selection: string; picked: string[] };
+  const thumbs = page.locator('.thumb');
+  const first = await thumbs.first().boundingBox();
+  // Drop onto a visible cell; an offscreen cell's bounding box lies behind
+  // the rail and is not a pointer drop target.
+  const last = await thumbs.nth(3).boundingBox();
+  expect(first).not.toBeNull();
+  expect(last).not.toBeNull();
+  const start = { x: first!.x + first!.width / 2, y: first!.y + first!.height / 2 };
+  const end = { x: last!.x + last!.width / 2, y: last!.y + last!.height / 2 };
+  await page.mouse.move(start.x, start.y);
+  await page.mouse.down();
+  await page.mouse.move(start.x + 12, start.y, { steps: 2 });
+  await page.mouse.move(end.x, end.y, { steps: 8 });
+  await page.mouse.up();
+  await expect.poll(() => state(page, 's.frames.map(f=>f.path)')).toEqual([
+    ...before.frames.slice(1, 4), before.frames[0], ...before.frames.slice(4),
+  ]);
+  expect(await state(page, '({ selection:s.selection, picked:s.picked })')).toEqual({ selection: before.selection, picked: before.picked });
+  const ordered = await state(page, 's.frames.map(f=>f.path)');
+  await page.reload();
+  await expect.poll(() => state(page, 's.frames.map(f=>f.path)')).toEqual(ordered);
+});
+
+test('scene placement applies a solved curve and the print mask is undoable', async ({ page }) => {
+  await openRoll(page);
+  await page.getByTestId('placement-auto').click();
+  await expect.poll(() => state(page, 's.sidecar.params.sceneLatitude.active')).toBe(true);
+  expect(await state(page, 's.sidecar.params.sceneLatitude.highlightRoom')).toBeGreaterThan(0);
+  await expect(page.getByTestId('tier-badge')).toHaveText('full');
+  const mask = page.locator('[data-section="contrastMask"]');
+  await mask.getByRole('switch').click();
+  await expect.poll(() => state(page, 's.sidecar.params.contrastMask.active')).toBe(true);
+  await page.keyboard.press('Control+z');
+  await expect.poll(() => state(page, 's.sidecar.params.contrastMask.active')).toBe(false);
+});
+
+test('white balance pointer sampling maps crop and quarter-turn coordinates to the source image', async ({ page }) => {
+  await openRoll(page);
+  const geometry = await state(page, 's.sidecar.geometry') as {
+    crop: { x: number; y: number; width: number; height: number };
+    quarterTurns: number; flipH: boolean; flipV: boolean; angle: number;
+    aspect: string; intendedSize: unknown; lockedRatio: unknown;
+  };
+  const changed = { ...geometry, crop: { x: 0.17, y: 0.11, width: 0.62, height: 0.73 }, quarterTurns: 1, flipH: true, angle: 0 };
+  await page.evaluate((g) => {
+    const w = window as unknown as { __spk: { sessionStore: { getState(): { sidecar: Record<string, unknown> }; setState(v: unknown): void } } };
+    const s = w.__spk.sessionStore.getState();
+    w.__spk.sessionStore.setState({ sidecar: { ...s.sidecar, geometry: g } });
+  }, changed);
+  await page.getByTestId('wb-picker').click();
+  await expect(page.getByTestId('wb-picker')).toContainText('Cancel');
+
+  const sample = { x: 0.27, y: 0.69 };
+  const native = await state(page, 's.nativeSize') as { width: number; height: number };
+  const canvasBox = await page.getByTestId('canvas').boundingBox();
+  expect(canvasBox).not.toBeNull();
+  const dpr = await page.evaluate(() => devicePixelRatio || 1);
+  const viewport = { width: canvasBox!.width * dpr, height: canvasBox!.height * dpr };
+  const output = outputSize(changed as never, native);
+  const zoom = Math.min(viewport.width / output.width, viewport.height / output.height);
+  const outWidth = output.width * zoom;
+  const outHeight = output.height * zoom;
+  const offsetX = (viewport.width - outWidth) / 2;
+  const offsetY = (viewport.height - outHeight) / 2;
+  const clickPoint = { clientX: canvasBox!.x + (offsetX + sample.x * outWidth) / dpr, clientY: canvasBox!.y + (offsetY + sample.y * outHeight) / dpr };
+  const expectedSource = sourcePoint(changed as never, sample, native);
+  await page.mouse.click(clickPoint.clientX, clickPoint.clientY);
+  await expect.poll(() => state(page, 's.sidecar.decode.temperature')).toBe(2000 + Math.round(expectedSource.x * 10_000));
+  expect(await state(page, 's.sidecar.decode.tint')).toBe(-150 + Math.round(expectedSource.y * 300));
 });
 
 test('the language switch renames the rails', async ({ page }) => {

@@ -107,8 +107,6 @@ function defaultFor(f: SchemaField): Value {
 
 export const UNSUPPORTED_ON_PORT = [
   'digital_intermediate',
-  'scene_latitude_mapping',
-  'contrast_mask',
   'overscan',
   'date_imprint',
 ];
@@ -140,7 +138,7 @@ interface Session {
 /** What `hello.methods` lists: every method `dispatch` answers. */
 const METHODS = [
   'hello', 'ping', 'shutdown', 'cancel', 'params_schema', 'print_lut_catalog', 'memory_report', 'probe', 'thumbnail',
-  'open', 'redecode', 'close', 'set_params', 'get_params', 'solve', 'render', 'scene_latitude', 'overscan_geometry',
+  'open', 'redecode', 'white_balance_pick', 'close', 'set_params', 'get_params', 'solve', 'render', 'scene_latitude', 'overscan_geometry',
   'preview_stock_lut', 'progress', 'export_image', 'export_cube', 'export_di',
 ];
 
@@ -320,6 +318,17 @@ export class MockHost {
           result: { session: s.id, width: s.width, height: s.height, kind: this.kind(s.path), metadata: this.metadata(s.path), params: s.params, timings_ms: { decode: 12, open: 3 } },
         };
       }
+      case 'white_balance_pick': {
+        this.session(p);
+        const x = Number(p.x);
+        const y = Number(p.y);
+        if (!Number.isFinite(x) || !Number.isFinite(y) || x < 0 || x > 1 || y < 0 || y > 1)
+          throw new HostError('bad_request', 'sample coordinates must be between 0 and 1');
+        // The in-page mock has no RAW sensor data. Encode the requested point
+        // in a deterministic reply for coordinate-wiring tests; this is never
+        // a photographic measurement.
+        return { result: { temperature_k: 2000 + Math.round(x * 10_000), tint: -150 + Math.round(y * 300) } };
+      }
       case 'close':
         this.sessions.delete(String(p.session ?? ''));
         return { result: {} };
@@ -423,8 +432,6 @@ export class MockHost {
       if (this.opts.realisticUnsupported && v === true) {
         const gate: Record<string, string> = {
           digital_intermediate: 'digital_intermediate',
-          scene_latitude_active: 'scene_latitude_mapping',
-          contrast_mask_active: 'contrast_mask',
           overscan_active: 'overscan',
           date_imprint_active: 'date_imprint',
         };
@@ -556,8 +563,8 @@ function latitude(s: Session, req: Record<string, unknown>) {
     total += v;
   }
   for (let i = 0; i < n; i++) fractions[i] = fractions[i]! / total;
-  const hp = Number(req.highlight_pull_back ?? 0);
-  const sp = Number(req.shadow_pull_back ?? 0);
+  const hp = Number(req.highlight_pull_back ?? 2);
+  const sp = Number(req.shadow_pull_back ?? 3.5);
   const rampEV: number[] = [];
   const rampY: number[] = [];
   for (let e = -8; e <= 8; e += 0.25) {

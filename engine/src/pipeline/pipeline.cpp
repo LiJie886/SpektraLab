@@ -6,6 +6,7 @@
 #endif
 
 #include <chrono>
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 

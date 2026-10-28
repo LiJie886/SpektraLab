@@ -820,7 +820,100 @@ bool decode_linear_prophoto(const fs::path& path, const DecodeOptions& options, 
     return true;
 }
 
-static void to_rgba8_srgb(const RgbSpace& space, const std::vector<float>& rgb, uint32_t codes, std::vector<uint8_t>& rgba) {
+bool pick_raw_white_balance(const fs::path &path, int orientation, double x, double y,
+                            double &temperature, double &tint, std::string &error) {
+    if (!(std::isfinite(x) && std::isfinite(y) && x >= 0 && x <= 1 && y >= 0 && y <= 1)) {
+        error = "white balance pick coordinates must be within 0..1";
+        return false;
+    }
+    LibRaw raw(LIBRAW_OPTIONS_NO_DATAERR_CALLBACK);
+    if (!raw_open(raw, path, error))
+        return false;
+    const auto &cfa = raw.imgdata.idata;
+    const bool rgbg = std::strncmp(cfa.cdesc, "RGBG", 4) == 0;
+    if (cfa.colors != 3 || cfa.is_foveon || !cfa.filters || cfa.filters == 1 || cfa.filters == 9 ||
+        !rgbg) {
+        error = "unsupported: white balance picking requires a three-colour Bayer RAW";
+        return false;
+    }
+    int st = raw.unpack();
+    if (st != LIBRAW_SUCCESS) {
+        error = std::string("RAW unpack: ") + LibRaw::strerror(st);
+        return false;
+    }
+    auto *src = raw.imgdata.rawdata.raw_image;
+    const auto &sz = raw.imgdata.sizes;
+    if (!src || sz.raw_width == 0 || sz.raw_height == 0 || !raw.imgdata.idata.filters) {
+        error = "unsupported: RAW Bayer sensor mosaic is unavailable";
+        return false;
+    }
+    // Caller coordinates refer to the displayed full frame before user geometry.
+    uint32_t sw = sz.width, sh = sz.height;
+    uint32_t dw = orientation >= 5 ? sh : sw, dh = orientation >= 5 ? sw : sh;
+    const int dx = std::clamp(int(std::floor(x * dw)), 0, int(dw) - 1);
+    const int dy = std::clamp(int(std::floor(y * dh)), 0, int(dh) - 1);
+    uint32_t raw_x = 0, raw_y = 0;
+    inverse_oriented_pixel(sw, sh, orientation, uint32_t(dx), uint32_t(dy), raw_x, raw_y);
+    int ox = int(raw_x), oy = int(raw_y);
+    ox += sz.left_margin;
+    oy += sz.top_margin;
+    const int radius = 12;
+    std::vector<BayerValue> samples;
+    const double white = raw.imgdata.color.maximum;
+    for (int yy = std::max(0, oy - radius); yy < std::min(int(sz.raw_height), oy + radius + 1);
+         ++yy)
+        for (int xx = std::max(0, ox - radius); xx < std::min(int(sz.raw_width), ox + radius + 1);
+             ++xx) {
+            if (yy < sz.top_margin || yy >= int(sz.top_margin + sz.height) || xx < sz.left_margin ||
+                xx >= int(sz.left_margin + sz.width))
+                continue;
+            const uint32_t active_y = uint32_t(yy - sz.top_margin);
+            const uint32_t active_x = uint32_t(xx - sz.left_margin);
+            int c = raw.fcol(active_y, active_x);
+            if (c == 3)
+                c = 1;
+            if (c < 0 || c > 2)
+                continue;
+            size_t idx = 0;
+            if (!raw_mosaic_offset(sz.raw_width, sz.raw_height, sz.raw_pitch, sz.width, sz.height,
+                                   sz.left_margin, sz.top_margin, active_x, active_y, idx)) {
+                error = "unsupported: RAW mosaic pitch or active margins are invalid";
+                return false;
+            }
+            const auto &cb = raw.imgdata.color.cblack;
+            const int black_channel = raw.fcol(active_y, active_x);
+            double black = raw.imgdata.color.black + cb[black_channel];
+            if (cb[4] && cb[5]) {
+                const size_t bi = 6 + active_y % cb[4] * cb[5] + active_x % cb[5];
+                if (bi >= LIBRAW_CBLACK_SIZE) {
+                    error = "unsupported: RAW spatial black-level table is invalid";
+                    return false;
+                }
+                black += cb[bi];
+            }
+            double channel_white = raw.imgdata.color.linear_max[black_channel];
+            if (!(channel_white > black))
+                channel_white = white;
+            samples.push_back({c, double(src[idx]), black, channel_white});
+        }
+    std::array<double, 3> camera{};
+    if (!bayer_neutral_from_samples(samples, camera, error))
+        return false;
+    if (!camera_neutral_temperature_tint(raw, camera, temperature, tint)) {
+        error = "camera XYZ matrix or sampled neutral is invalid";
+        return false;
+    }
+    if (!std::isfinite(temperature) || !std::isfinite(tint) || temperature < 2000 ||
+        temperature > 50000 || tint < -150 || tint > 150) {
+        error = "sampled neutral is outside the supported temperature/tint range (2000..50000 K, "
+                "-150..150)";
+        return false;
+    }
+    return true;
+}
+
+static void to_rgba8_srgb(const RgbSpace &space, const std::vector<float> &rgb, uint32_t codes,
+                          std::vector<uint8_t> &rgba) {
     // source encoded -> linear -> XYZ D50 -> linear sRGB (D50-adapted) -> sRGB.
     const RgbSpace srgb = srgb_space();
     const std::array<double, 9> m = mul3(invert3(srgb.to_xyz_d50), space.to_xyz_d50);

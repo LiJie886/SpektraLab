@@ -1,0 +1,78 @@
+#version 450
+// RFC-024: the print-side spectral integral with the analysed mask applied
+// before pre-flash. meta[4] carries the strip's origin in the full frame.
+layout(local_size_x = 256) in;
+layout(set = 0, binding = 0, std430) readonly buffer Cmy { float value[]; }
+cmy;
+layout(set = 0, binding = 1, std430) readonly buffer Chd { float value[]; }
+chd;
+layout(set = 0, binding = 2, std430) readonly buffer Base { float value[]; }
+base_data;
+layout(set = 0, binding = 3, std430) readonly buffer Integral { float value[]; }
+integral_data;
+layout(set = 0, binding = 4, std430) readonly buffer Params { float value[]; }
+p;
+layout(set = 0, binding = 5, std430) readonly buffer Coefficients { float value[]; }
+coef;
+layout(set = 0, binding = 6, std430) readonly buffer Meta { uint value[]; }
+meta;
+layout(set = 0, binding = 7, std430) writeonly buffer Output { float value[]; }
+output_data;
+uint spk_global_index() {
+    return gl_GlobalInvocationID.y * (gl_NumWorkGroups.x * gl_WorkGroupSize.x) +
+           gl_GlobalInvocationID.x;
+}
+vec3 exposure(uint i, uint nl) {
+    precise vec3 a = vec3(0);
+    for (uint l = 0; l < nl; ++l) {
+        precise float d = cmy.value[3 * i] * chd.value[3 * l] +
+                  cmy.value[3 * i + 1] * chd.value[3 * l + 1] +
+                  cmy.value[3 * i + 2] * chd.value[3 * l + 2] + base_data.value[l];
+        float t = exp2(-d * 3.321928094887362);
+        a += t * vec3(integral_data.value[3 * l], integral_data.value[3 * l + 1],
+                      integral_data.value[3 * l + 2]);
+    }
+    return a * vec3(p.value[0], p.value[1], p.value[2]);
+}
+float mask_x(vec3 a) {
+    precise float s = 0;
+    for (uint c = 0; c < 3; ++c)
+        s += max(log2(max(a[c] * p.value[3 + c], 0.0)), -20.0);
+    return s / 3.0;
+}
+float mask_g(float d, float h) { return d * h * inversesqrt(h * h + d * d); }
+float delta(float b) {
+    float d = 0;
+    if (p.value[11] != 0 && b < p.value[9]) {
+        float q = p.value[9] - b;
+        d = q - mask_g(q, p.value[10]);
+    } else if (p.value[14] != 0 && b > p.value[12]) {
+        float q = b - p.value[12];
+        d = mask_g(q, p.value[13]) - q;
+    }
+    float l = p.value[15];
+    return d * l * inversesqrt(l * l + d * d);
+}
+void main() {
+    uint i = spk_global_index(), n = meta.value[0], nl = meta.value[1], W = meta.value[2],
+         H = meta.value[3], row0 = meta.value[4], gw = meta.value[5], gh = meta.value[6];
+    if (i >= n)
+        return;
+    vec3 a = exposure(i, nl);
+    uint px = i % W, py = row0 + i / W;
+    float u = clamp((float(px) + .5) * float(gw) / float(W) - .5, 0, float(gw - 1)),
+          v = clamp((float(py) + .5) * float(gh) / float(H) - .5, 0, float(gh - 1));
+    uint u0 = uint(floor(u)), v0 = uint(floor(v)), u1 = min(u0 + 1, gw - 1),
+         v1 = min(v0 + 1, gh - 1);
+    float tu = u - float(u0), tv = v - float(v0);
+    vec2 c00 = vec2(coef.value[2 * (v0 * gw + u0)], coef.value[2 * (v0 * gw + u0) + 1]),
+         c01 = vec2(coef.value[2 * (v0 * gw + u1)], coef.value[2 * (v0 * gw + u1) + 1]),
+         c10 = vec2(coef.value[2 * (v1 * gw + u0)], coef.value[2 * (v1 * gw + u0) + 1]),
+         c11 = vec2(coef.value[2 * (v1 * gw + u1)], coef.value[2 * (v1 * gw + u1) + 1]);
+    precise vec2 ab = mix(mix(c00, c01, tu), mix(c10, c11, tu), tv);
+    float k = exp2(delta(ab.x * mask_x(a) + ab.y));
+    for (uint c = 0; c < 3; ++c) {
+        precise float value = max(k * a[c] + p.value[6 + c], 0.0) + 1e-10;
+        output_data.value[3 * i + c] = log(value) * 0.4342944819032518;
+    }
+}

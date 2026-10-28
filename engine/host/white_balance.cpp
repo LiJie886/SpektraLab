@@ -49,7 +49,38 @@ bool camera_matrix(const LibRaw& raw, double m[9]) {
             m[r * 3 + c] = raw.imgdata.color.cam_xyz[r][c];
             sum += std::fabs(m[r * 3 + c]);
         }
-    return sum > 0 && std::isfinite(sum);
+    if (sum > 0 && std::isfinite(sum)) return true;
+    // A DNG can carry its own matrix without populating LibRaw's camera-table
+    // cam_xyz field. Use its daylight profile, including calibration/analog
+    // balance, on the same single-illuminant basis as Temperature/Tint above.
+    const auto& color = raw.imgdata.color;
+    for (int pass = 0; pass < 2; ++pass) {
+        for (const auto& profile : color.dng_color) {
+            if (pass == 0 && profile.illuminant != LIBRAW_WBI_D65) continue;
+            // LibRaw 0.22 copies these public matrices from the chosen IFD
+            // without copying parsedfields; inspect the actual values.
+            double calibration_sum = 0;
+            for (int r = 0; r < 3; ++r)
+                for (int c = 0; c < 3; ++c) calibration_sum += std::fabs(profile.calibration[r][c]);
+            sum = 0;
+            for (int r = 0; r < 3; ++r) {
+                for (int c = 0; c < 3; ++c) {
+                    double v = 0;
+                    for (int k = 0; k < 3; ++k) {
+                        const double calibration = calibration_sum > 0
+                            ? profile.calibration[r][k] : double(r == k);
+                        v += calibration * profile.colormatrix[k][c];
+                    }
+                    if (color.dng_levels.analogbalance[0] > 0 && color.dng_levels.analogbalance[1] > 0 && color.dng_levels.analogbalance[2] > 0)
+                        v *= color.dng_levels.analogbalance[r];
+                    m[3 * r + c] = v;
+                    sum += std::fabs(v);
+                }
+            }
+            if (sum > 0 && std::isfinite(sum)) return true;
+        }
+    }
+    return false;
 }
 
 }  // namespace
@@ -105,6 +136,85 @@ void xy_to_temperature_tint(double x, double y, double& temperature, double& tin
         }
         last_dt = dt; last_du = du; last_dv = dv;
     }
+}
+
+void inverse_oriented_pixel(uint32_t width, uint32_t height, int orientation,
+                            uint32_t display_x, uint32_t display_y, uint32_t& source_x, uint32_t& source_y) {
+    source_x = display_x;
+    source_y = display_y;
+    switch (orientation) {
+        case 2: source_x = width - 1 - display_x; break;
+        case 3: source_x = width - 1 - display_x; source_y = height - 1 - display_y; break;
+        case 4: source_y = height - 1 - display_y; break;
+        case 5: source_x = display_y; source_y = display_x; break;
+        case 6: source_x = display_y; source_y = height - 1 - display_x; break;
+        case 7: source_x = width - 1 - display_y; source_y = height - 1 - display_x; break;
+        case 8: source_x = width - 1 - display_y; source_y = display_x; break;
+        default: break;
+    }
+}
+
+bool bayer_neutral_from_samples(const std::vector<BayerValue>& samples, std::array<double, 3>& neutral,
+                               std::string& error) {
+    double sums[3] = {}, good[3] = {}, rejected[3] = {};
+    for (const auto& sample : samples) {
+        if (sample.channel < 0 || sample.channel > 2 || !std::isfinite(sample.value) ||
+            !std::isfinite(sample.black) || !std::isfinite(sample.white)) continue;
+        const double span = sample.white - sample.black;
+        const double value = sample.value - sample.black;
+        if (!(span > 0) || value <= span * 0.01 || value >= span * 0.98) {
+            rejected[sample.channel]++;
+            continue;
+        }
+        sums[sample.channel] += value;
+        good[sample.channel]++;
+    }
+    for (int c = 0; c < 3; ++c) {
+        if (good[c] < 4) { error = "too few non-black, non-saturated samples for a Bayer channel"; return false; }
+        if (rejected[c] / (good[c] + rejected[c]) > 0.20) {
+            error = "too many black or saturated samples in a Bayer channel"; return false;
+        }
+        neutral[c] = sums[c] / good[c];
+    }
+    return true;
+}
+
+bool camera_neutral_to_xy(const std::array<double, 9>& matrix, const std::array<double, 3>& neutral,
+                          double& x, double& y) {
+    double inverse[9];
+    if (!invert3(matrix.data(), inverse)) return false;
+    const double xyz[3] = {
+        inverse[0] * neutral[0] + inverse[1] * neutral[1] + inverse[2] * neutral[2],
+        inverse[3] * neutral[0] + inverse[4] * neutral[1] + inverse[5] * neutral[2],
+        inverse[6] * neutral[0] + inverse[7] * neutral[1] + inverse[8] * neutral[2],
+    };
+    const double sum=xyz[0]+xyz[1]+xyz[2];
+    if (!(sum>0) || !std::isfinite(sum)) return false;
+    x=xyz[0]/sum; y=xyz[1]/sum;
+    return std::isfinite(x)&&std::isfinite(y);
+}
+
+bool camera_neutral_temperature_tint(const LibRaw& raw, const std::array<double, 3>& neutral,
+                                     double& temperature, double& tint) {
+    std::array<double, 9> matrix{};
+    double x = 0, y = 0;
+    if (!camera_matrix(raw, matrix.data()) || !camera_neutral_to_xy(matrix, neutral, x, y)) return false;
+    xy_to_temperature_tint(x, y, temperature, tint);
+    return std::isfinite(temperature) && std::isfinite(tint);
+}
+
+bool raw_mosaic_offset(uint32_t raw_width, uint32_t raw_height, uint32_t pitch_bytes,
+                       uint32_t active_width, uint32_t active_height, uint32_t left_margin,
+                       uint32_t top_margin, uint32_t active_x, uint32_t active_y, size_t& offset) {
+    if (pitch_bytes < raw_width * sizeof(uint16_t) || pitch_bytes % sizeof(uint16_t) != 0 ||
+        active_x >= active_width || active_y >= active_height ||
+        left_margin + active_width > raw_width || top_margin + active_height > raw_height) return false;
+    const uint64_t row = uint64_t(active_y + top_margin) * (pitch_bytes / sizeof(uint16_t));
+    const uint64_t col = active_x + left_margin;
+    const uint64_t index = row + col;
+    if (index >= uint64_t(pitch_bytes / sizeof(uint16_t)) * raw_height) return false;
+    offset = size_t(index);
+    return true;
 }
 
 bool as_shot_temperature_tint(const LibRaw& raw, double& temperature, double& tint) {

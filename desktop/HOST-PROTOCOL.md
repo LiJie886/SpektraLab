@@ -1,5 +1,13 @@
 # SpektraLab host protocol (Linux / Windows desktop)
 
+The `white_balance_pick` method (2026-10-28) samples the original sensor mosaic,
+not a thumbnail or developed print. It supports three-colour Bayer RAW with
+an invertible camera/DNG colour matrix. Headroom mode, non-Bayer sensors,
+out-of-frame coordinates and patches with insufficient usable samples are
+refused. Black/saturation rejection is per channel (1%/98% of available range,
+at least four usable samples per channel, at most 20% rejected). Temperature
+and tint have the same limits and single-illuminant approximation as `redecode`.
+
 The Linux/Windows desktop app is two processes:
 
 - **`spektralab-host`** (`engine/host/`, C++20): owns the engine (`spk_*` C ABI,
@@ -106,6 +114,7 @@ What a file is decoded *to* (the engine develops linear ProPhoto RGB, top row fi
 |---|---|---|
 | `open` | `{path, decode?: {raw_mode?: "compatible16"\|"headroom", white_balance?: {mode: "as_shot"\|"custom", temperature_k?, tint?}, lens_correction?: false}, params?: <full or partial params JSON>}` | `{session: "<sid>", width, height, kind, metadata, params, detected_input, output_color_space, timings_ms: {decode, open}}` — any other `decode` key is `unsupported` |
 | `redecode` | `{session, decode}` | as `open` (same `session` id, params kept): decode the session's file again with other decode settings. The engine session is replaced; on failure the old one is untouched (R2) |
+| `white_balance_pick` | `{session, x, y}` | `{temperature_k, tint}` from a Bayer RAW neighbourhood. Coordinates are 0..1 in the EXIF-oriented full image, before user crop/rotation/flips. Read-only: apply through `redecode`. |
 | `close` | `{session}` | `{}` |
 | `set_params` | `{session, delta: {...}}` | `{params}` (the delta is applied transactionally: on error the session is unchanged) |
 | `get_params` | `{session}` | `{params}` |

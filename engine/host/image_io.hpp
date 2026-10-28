@@ -67,6 +67,8 @@ struct DecodeOptions {
 constexpr const char* kUnsupportedPrefix = "unsupported: ";
 bool decode_linear_prophoto(const std::filesystem::path& path, const DecodeOptions& options,
                             FloatImage& out, Probe& probe, std::string& error);
+bool pick_raw_white_balance(const std::filesystem::path& path, int orientation, double x, double y,
+                            double& temperature_k, double& tint, std::string& error);
 
 // A display thumbnail, sRGB 8-bit, orientation applied, long edge <= long_edge.
 // RAW: the embedded preview when there is one, else a half-size decode.

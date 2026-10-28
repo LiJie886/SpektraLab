@@ -39,6 +39,8 @@ import { settingsStore } from './settings';
 import { frameImages, makeThumbFromPrint } from './frames';
 import { thumbs } from './thumbs';
 import { tz } from '../i18n';
+import { resolvedPlacement } from '@shared/latitude';
+import { applyFrameOrder, frameOrderStoreName, moveFrame } from '@shared/frameOrder';
 
 export type Tool = 'select' | 'hand' | 'crop';
 
@@ -105,6 +107,8 @@ export interface SessionState {
   settingsOpen: boolean;
   aboutOpen: boolean;
   batchExporting: boolean;
+  whiteBalancePicking: boolean;
+  whiteBalanceSampling: boolean;
 }
 
 const INITIAL: SessionState = {
@@ -145,12 +149,20 @@ const INITIAL: SessionState = {
   settingsOpen: false,
   aboutOpen: false,
   batchExporting: false,
+  whiteBalancePicking: false,
+  whiteBalanceSampling: false,
 };
 
 export const sessionStore = createStore<SessionState>(() => INITIAL);
 export const useSession = <T>(sel: (s: SessionState) => T): T => useStore(sessionStore, sel);
 const get = () => sessionStore.getState();
 const set = (p: Partial<SessionState>) => sessionStore.setState(p);
+
+sessionStore.subscribe((s, previous) => {
+  if ((s.batchExporting && !previous.batchExporting) || (s.exportOpen && !previous.exportOpen) || (s.redecoding && !previous.redecoding) || s.selection !== previous.selection || s.engineSession !== previous.engineSession || s.sidecar.decode !== previous.sidecar.decode) {
+    cancelWhiteBalancePick();
+  }
+});
 
 // ------------------------------------------------------------ the scheduler
 //
@@ -166,6 +178,9 @@ let fullTimer: ReturnType<typeof setTimeout> | null = null;
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
 let lastUndoAt = 0;
 let openGen = 0;
+let libraryGen = 0;
+let whiteBalancePickGen = 0;
+const frameOrderWrites = new Map<string, Promise<void>>();
 const FULL_DELAY_MS = 400;
 
 function noteError(op: string, e: unknown) {
@@ -319,6 +334,38 @@ export function setParams(fn: (p: FilmParams) => FilmParams) {
   void requestPrint();
 }
 
+/** Fit against the current developed frame, then save the resolved curve. */
+export async function fitScenePlacement(request: Record<string, unknown>): Promise<void> {
+  const s = get();
+  if (!s.engineSession || !s.selection || s.batchExporting || s.exportOpen || !s.gate.sceneLatitude) return;
+  const unchanged = () => {
+    const now = get();
+    return now.engineSession === s.engineSession && now.selection === s.selection &&
+      now.sidecar.params === s.sidecar.params && now.sidecar.decode === s.sidecar.decode && !now.batchExporting && !now.exportOpen;
+  };
+  // The render scheduler owns set_params. Wait for it rather than introducing
+  // a second writer whose old delta could overwrite a newer slider edit.
+  if (!inFlight && sentParams !== s.sidecar.params) await requestPrint();
+  const deadline = performance.now() + 180_000;
+  while (inFlight || get().redecoding) {
+    if (!unchanged()) throw new Error(tz('The photo or settings changed. Apply again.', '照片或参数已变化，请重新应用。'));
+    if (performance.now() > deadline) throw new Error(tz('The engine is still busy. Try again after rendering.', '引擎仍在忙碌，请等待渲染完成后重试。'));
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  if (!unchanged() || sentParams !== s.sidecar.params) throw new Error(tz('The photo or settings changed. Apply again.', '照片或参数已变化，请重新应用。'));
+  const key = s.sidecar.params.placementIsRight ? 'sceneLatitudeOther' : 'sceneLatitude';
+  const current = s.sidecar.params[key];
+  const reply = await host().sceneLatitude(s.engineSession, {
+    norm: current.norm, rolloff: current.rolloff, max_lift: current.maxLift,
+    shadow_percentile: current.shadowPercentile, highlight_percentile: current.highlightPercentile,
+    ...request,
+  });
+  if (!unchanged()) throw new Error(tz('The photo or settings changed. Apply again.', '照片或参数已变化，请重新应用。'));
+  const fitted = resolvedPlacement(current, reply);
+  beginGesture();
+  setParams((p) => ({ ...p, [key]: fitted }));
+}
+
 /** A Layer 2 edit: one draw. */
 export function setAdjustments(fn: (a: Adjustments) => Adjustments) {
   const s = get();
@@ -354,6 +401,63 @@ export function setDecode(fn: (d: DecodeSettings) => DecodeSettings) {
   set({ sidecar: { ...get().sidecar, decode: next, state: get().sidecar.state === 'processed' ? 'stale' : get().sidecar.state } });
   scheduleSave();
   scheduleRedecode();
+}
+
+/** Enter a one-shot RAW-only neutral picker, separate from the crop tool. */
+export function beginWhiteBalancePick() {
+  const s = get();
+  if (s.batchExporting || s.exportOpen || s.redecoding || !s.selection || !s.engineSession) return;
+  if (!isRawPath(s.selection) || s.frameKind !== 'raw') {
+    set({ status: tz('The white balance picker is available for RAW photographs only.', '白平衡吸管仅适用于 RAW 照片。') });
+    return;
+  }
+  if (!s.hello?.methods?.includes('white_balance_pick')) {
+    set({ status: tz('This engine does not support RAW white balance sampling.', '当前引擎不支持 RAW 白平衡取样。') });
+    return;
+  }
+  whiteBalancePickGen++;
+  set({ whiteBalancePicking: true, status: tz('Click a neutral area in the photograph.', '请点击照片中的中性区域。') });
+}
+
+export function cancelWhiteBalancePick() {
+  whiteBalancePickGen++;
+  if (get().whiteBalancePicking || get().whiteBalanceSampling) set({ whiteBalancePicking: false, whiteBalanceSampling: false, status: '' });
+}
+
+/** Sample an EXIF-oriented source coordinate and apply the camera-neutral WB. */
+export async function sampleWhiteBalance(x: number, y: number) {
+  const s = get();
+  if (!s.whiteBalancePicking) return;
+  if (s.batchExporting || s.exportOpen || s.redecoding) {
+    set({ whiteBalancePicking: false, status: '' });
+    return;
+  }
+  const requestGen = ++whiteBalancePickGen;
+  set({ whiteBalancePicking: false, whiteBalanceSampling: true, status: tz('Sampling RAW white balance…', '正在取样 RAW 白平衡…') });
+  const sid = s.engineSession;
+  const selection = s.selection;
+  const decode = s.sidecar.decode;
+  if (!sid || !selection) return;
+  try {
+    const result = await host().whiteBalancePick(sid, x, y);
+    const now = get();
+    if (requestGen !== whiteBalancePickGen || now.engineSession !== sid || now.selection !== selection || now.sidecar.decode !== decode || now.batchExporting || now.exportOpen || now.redecoding) return;
+    if (!Number.isFinite(result.temperature_k) || !Number.isFinite(result.tint)) {
+      set({ status: tz('The RAW sample returned invalid white balance values.', 'RAW 取样返回了无效的白平衡数值。') });
+      return;
+    }
+    set({ whiteBalanceSampling: false });
+    beginGesture();
+    setDecode((d) => ({ ...d, whiteBalance: 'Custom', temperature: result.temperature_k, tint: result.tint }));
+  } catch (e) {
+    const now = get();
+    if (requestGen !== whiteBalancePickGen || now.engineSession !== sid || now.selection !== selection || now.sidecar.decode !== decode || now.batchExporting || now.exportOpen || now.redecoding) return;
+    const detail = e instanceof HostCallError ? `${e.message} (${e.code})` : e instanceof Error ? e.message : String(e);
+    platform().log('warn', `white balance sample: ${detail}`);
+    set({ whiteBalanceSampling: false, status: tz(`White balance sample failed: ${detail}`, `白平衡取样失败：${detail}`), lastError: detail });
+  } finally {
+    if (requestGen === whiteBalancePickGen && get().whiteBalanceSampling) set({ whiteBalanceSampling: false });
+  }
 }
 
 /** Whether this host can re-decode (it lists `redecode` in `hello.methods`). */
@@ -502,7 +606,7 @@ export async function openFolder(dir: string) {
   if (get().batchExporting) return;
   try {
     const files = await platform().listImages(dir);
-    await setLibrary(dir, files);
+    if (!(await setLibrary(dir, files))) return;
     settingsStore.getState().set('lastFolder', dir);
     if (files[0]) await select(files[0].path);
   } catch (e) {
@@ -523,7 +627,7 @@ export async function openPaths(paths: string[]) {
     if (entries.length === 1 && paths.length === 1 && paths[0] === entries[0]!.path) {
       const dir = dirName(entries[0]!.path);
       const all = await platform().listImages(dir).catch(() => entries);
-      await setLibrary(dir, all.length ? all : entries);
+      if (!(await setLibrary(dir, all.length ? all : entries))) return;
       await select(entries[0]!.path);
       return;
     }
@@ -533,7 +637,7 @@ export async function openPaths(paths: string[]) {
       return;
     }
     const folder = paths.length === 1 ? paths[0]! : dirName(entries[0]!.path);
-    await setLibrary(folder, entries);
+    if (!(await setLibrary(folder, entries))) return;
     await select(entries[0]!.path);
   } catch (e) {
     noteError(tz('Opening', '打开'), e);
@@ -541,23 +645,55 @@ export async function openPaths(paths: string[]) {
 }
 
 async function setLibrary(folder: string, files: FileEntry[]) {
+  const gen = ++libraryGen;
+  const storeName = frameOrderStoreName(folder);
+  await frameOrderWrites.get(storeName)?.catch(() => {});
+  let storedOrder: unknown = null;
+  try {
+    storedOrder = await platform().storeRead('FrameOrder', storeName);
+  } catch (e) {
+    platform().log('warn', `Loading folder order: ${e instanceof Error ? e.message : String(e)}`);
+    set({ status: tz('Could not load this folder’s saved order; using file order.', '无法读取文件夹的已保存顺序，将按文件顺序显示。') });
+  }
+  if (gen !== libraryGen) return false;
+  const orderedFiles = applyFrameOrder(files, storedOrder);
   await flushSave();
+  if (gen !== libraryGen) return false;
   await closeEngineSession();
+  if (gen !== libraryGen) return false;
   thumbs.reset();
   frameImages.print = null;
   frameImages.original = null;
-  set({ folder, frames: files, selection: null, picked: [], savedGeometry: {}, thumbVersion: get().thumbVersion + 1, imageVersion: get().imageVersion + 1, badge: null });
+  set({ folder, frames: orderedFiles, selection: null, picked: [], savedGeometry: {}, thumbVersion: get().thumbVersion + 1, imageVersion: get().imageVersion + 1, badge: null });
   void platform().setTitle(`SpektraLab — ${baseName(folder)}`);
   // The thumbnails' crop masks come from each frame's saved geometry.
   void Promise.all(
-    files.map(async (f) => {
+    orderedFiles.map(async (f) => {
       const raw = await platform().sidecarLoad(f.path).catch(() => null);
       return raw ? ([f.path, decodeSidecar(raw).geometry] as const) : null;
     }),
   ).then((rows) => {
+    if (gen !== libraryGen) return;
     const g: Record<string, Geometry> = {};
     for (const r of rows) if (r) g[r[0]] = r[1];
     set({ savedGeometry: { ...g, ...get().savedGeometry } });
+  });
+  return true;
+}
+
+/** Reorder the in-memory library and persist only its path list per folder. */
+export function reorderFrames(source: string, target: string) {
+  const s = get();
+  if (s.batchExporting || !s.folder) return;
+  const frames = moveFrame(s.frames, source, target);
+  if (frames === s.frames) return;
+  set({ frames });
+  const storeName = frameOrderStoreName(s.folder);
+  const previous = frameOrderWrites.get(storeName) ?? Promise.resolve();
+  const write = previous.catch(() => {}).then(() => platform().storeWrite('FrameOrder', storeName, frames.map((frame) => frame.path)));
+  frameOrderWrites.set(storeName, write);
+  void write.catch((e) => noteError(tz('Saving folder order', '保存文件夹顺序'), e)).finally(() => {
+    if (frameOrderWrites.get(storeName) === write) frameOrderWrites.delete(storeName);
   });
 }
 
@@ -624,6 +760,7 @@ export async function select(path: string): Promise<void> {
   const sidecar = raw ? decodeSidecar(raw) : newSidecar();
   set({
     selection: path,
+    whiteBalancePicking: false,
     picked: get().picked.includes(path) ? get().picked : [path],
     sidecar,
     nativeSize: null,

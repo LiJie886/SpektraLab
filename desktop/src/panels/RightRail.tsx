@@ -5,7 +5,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { Checkbox, NumberField, PillMenu, ScrubSlider, Section, SegmentedSwitch, ToggleRow, signed } from '../controls/controls';
 import { t, tz } from '../i18n';
-import { hostRedecodes, setAdjustments, setDecode, setFilmFrame, setFilmSide, setParams, setSideLengthMM, useSession } from '../state/session';
+import { beginWhiteBalancePick, cancelWhiteBalancePick, hostRedecodes, setAdjustments, setDecode, setFilmFrame, setFilmSide, setParams, setSideLengthMM, useSession } from '../state/session';
 import { settingsStore, useSettings } from '../state/settings';
 import {
   type AEMethod,
@@ -37,6 +37,7 @@ import {
 import { CurveEditor } from './CurveEditor';
 import { unsupportedReason } from './gate';
 import { host, HostCallError } from '../host/client';
+import { ContrastMaskSection, ScenePlacementSection } from './PlacementSections';
 
 export function RightRail() {
   const tab = useSettings((s) => s.parametersTab);
@@ -60,6 +61,7 @@ export function RightRail() {
             <CameraSection />
             <FilmFormatSection />
             <ScenePlacementSection />
+            <ContrastMaskSection />
           </>
         ) : (
           <>
@@ -165,6 +167,8 @@ function CameraSection() {
     'Linux 与 Windows 版不提供镜头校正：RAW 解码器不含镜头配置文件。',
   );
   const wb = useWhiteBalance();
+  const picking = useSession((s) => s.whiteBalancePicking || s.whiteBalanceSampling);
+  const canPick = useSession((s) => !!s.engineSession && !!s.hello?.methods?.includes('white_balance_pick') && !s.batchExporting && !s.exportOpen && !s.redecoding);
   const options: { value: AEMethod; label: string }[] = [
     { value: 'custom', label: t('meteringCustom') },
     { value: 'balanced', label: t('meteringBalanced') },
@@ -235,6 +239,12 @@ function CameraSection() {
         gradient="linear-gradient(90deg,#00A93A,#8AA45E,#E4007F)"
         testId="wb-tint"
       />
+      <div className="row">
+        <button className={'btn' + (picking ? ' primary' : '')} disabled={!!wb.reason || !canPick}
+          onClick={() => picking ? cancelWhiteBalancePick() : beginWhiteBalancePick()} data-testid="wb-picker">
+          {picking ? tz('Cancel white balance picker', '取消白平衡取样') : tz('White balance picker', '白平衡吸管')}
+        </button>
+      </div>
       <ScrubSlider label={t('cameraVignetting')} value={vignette} range={[-100, 100]} snap={5} format={signed(0)} onChange={(v) => setAdjustments((a) => ({ ...a, vignette: { ...a.vignette, amount: v } }))} />
       <ToggleRow label={t('cameraLensCorrection')} on={false} onChange={() => {}} disabled reason={lensReason} />
     </Section>
@@ -353,18 +363,6 @@ function FilmFormatSection() {
 }
 
 // ----------------------------------------------------------- Scene Placement
-
-function ScenePlacementSection() {
-  const gate = useSession((s) => s.gate);
-  const sl = useSession((s) => s.sidecar.params.sceneLatitude);
-  const reason = unsupportedReason('scene_latitude_mapping', gate.sceneLatitude);
-  return (
-    <Section id="scenePlacement" title={t('sectionScenePlacement')} unsupported={reason} onReset={() => {}} resetHelp={t('helpResetPlacement')} resetEnabled={sl.active}>
-      <ScrubSlider label={t('placementHighlight')} value={sl.highlightPullBack} range={[0, 8]} snap={0.25} onChange={() => {}} disabled={!!reason} reason={reason ?? undefined} />
-      <ScrubSlider label={t('placementShadow')} value={sl.shadowPullBack} range={[0, 8]} snap={0.25} onChange={() => {}} disabled={!!reason} reason={reason ?? undefined} />
-    </Section>
-  );
-}
 
 // ---------------------------------------------------------------- Post-Dev
 

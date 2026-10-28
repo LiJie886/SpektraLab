@@ -1,11 +1,17 @@
 # PARITY — the macOS app (`modern_UI/Spektrafilm`) → `desktop/`
 
+2026-10-28: scene mapping, contrast mask, the RAW white-balance picker and
+per-folder filmstrip reorder are implemented. See
+[Windows feature validation](docs/windows-feature-update.md). The 2026-10-06
+scope decision below is historical; only Cineon DI, film edge/date back and
+half-frame pairs remain unavailable from that list.
+
 What of the SwiftUI/Metal app this TypeScript (Tauri 2) port carries, area by
 area. **ported** = the behaviour is here; **partial** = present with a stated
 gap; **stub** = the controls are drawn and disabled with the reason;
 **skipped** = deliberately not carried, with why.
 
-Owner's scope decision (2026-10-06): the Linux/Windows engine refuses the
+Original scope decision (2026-10-06; superseded for scene mapping and contrast mask above): the Linux/Windows engine refuses the
 contrast mask, scene latitude mapping, the Cineon DI, film edge/overscan, date
 back and the half-frame pair in this version; their sections are cheap UI
 only — present, disabled with a tooltip driven by
@@ -38,11 +44,11 @@ wiring job. `params.wire()` omits their rows while the host cannot do them
 | `CropSection` | `LeftRail.tsx` | ported | Aspect (+ portrait), straighten, rotate/flip, output size readout. |
 | `EnlargerSection` | `LeftRail.tsx` | ported | Brightness (stops), Y/M filter shifts with print-colour tracks, pre-flash. Pair scope skipped (no pairs). |
 | `LatitudeSection` | `RightRail.tsx` | partial | The host *measures* (`scene_latitude` works); the plot shows the scene histogram over the medium's range with below/within/above. Separation ramp and pull-back overlay not drawn. |
-| `CameraSection`, `WhiteBalanceRows`, `WhiteBalanceBoxes` | `RightRail.tsx`, `shared/whiteBalance.ts` | partial | Metering pill (Custom = meter off), Film Exposure + As Shot, Vignetting (Layer 2). Camera Temperature / Tint at decode with the two As Shot boxes (the Mac's rules, unit-tested) and the presets in the section's "•••"; an edit re-decodes through `redecode` (R2, landed 950dd47), debounced 350 ms, one undo step; RAW only (a raster greys the rows with the Mac's reason). **Lens Correction stays disabled**: R2 declined it (LibRaw has no lens profiles). The neutral picker (eyedropper) is not ported. |
+| `CameraSection`, `WhiteBalanceRows`, `WhiteBalanceBoxes` | `RightRail.tsx`, `shared/whiteBalance.ts` | partial | Metering pill (Custom = meter off), Film Exposure + As Shot, Vignetting (Layer 2). Camera Temperature / Tint at decode with the two As Shot boxes (the Mac's rules, unit-tested) and the presets in the section's "•••"; an edit re-decodes through `redecode` (R2, landed 950dd47), debounced 350 ms, one undo step; RAW only (a raster greys the rows with the Mac's reason). **Lens Correction stays disabled**: R2 declined it (LibRaw has no lens profiles). The RAW neutral picker uses `white_balance_pick`, with geometry-correct sensor sampling, cancellation and undo; see the 2026-10-28 notes. |
 | `FilmFormatSection` (ParameterSections.swift) | `RightRail.tsx` | ported | Size (cine pills) / Side / Side Length + unit, effect toggles, anti-halation layer, decoupled strengths (Settings), sub-layer grain in the menu. Film format derived from the photograph's aspect. |
-| `ScenePlacementSection`, `ToneMaskSection` | `RightRail.tsx` | stub | Scene Placement disabled (mapping refused). Tone Mask hidden as on the Mac (`FeatureFlags.toneMask = false`). |
+| `ScenePlacementSection`, `ToneMaskSection` | `PlacementSections.tsx` | ported | Scene Placement fits through `scene_latitude`, validates and stores the resolved curve; contrast mask has explicit controls on Windows/Linux while the macOS flag stays off. See the 2026-10-28 validation notes. |
 | Post-Dev `RightSections.swift` | `RightRail.tsx`, `CurveEditor.tsx` | partial | White Balance, Exposure (8 sliders), Curve (5 channels, add/move/remove points, histogram behind), Color Balance as a hue/saturation disc + three sliders per zone (the Mac's `ColorWheel` has more affordances). |
-| `Panels/Filmstrip.swift`, `CropMaskedThumbnail` | `windows/Filmstrip.tsx`, `shared/surfaces.ts` + test | ported | Whole photograph, turned/flipped, outside of the crop under an 82 % mask; live geometry for the open frame, saved for the rest; print thumbnail replaces the embedded one after a full render. Click / Ctrl-click picks. Drag-to-reorder (`FrameOrder`) skipped. |
+| `Panels/Filmstrip.swift`, `CropMaskedThumbnail` | `windows/Filmstrip.tsx`, `shared/surfaces.ts` + test | ported | Whole photograph, turned/flipped, outside of the crop under an 82 % mask; live geometry for the open frame, saved for the rest; print thumbnail replaces the embedded one after a full render. Click / Ctrl-click picks. Pointer drag-to-reorder is persisted per folder under app data `FrameOrder`; selection is preserved and source files are untouched. |
 | `Model/Session.swift` select / develop / undo / save | `state/session.ts` | ported | Undo (60 steps, 0.5 s coalescing) + redo. Host restart re-opens the frame from its sidecar. |
 | `Model/Sidecar.swift` | `shared/sidecar.ts` + test, `src-tauri/src/files.rs` + test | ported | `<app data>/Sidecars/<file>-<sha256(path)[:16]>.spektra.json`, Mac JSON shape, unknown keys (masks, heldCrop…) carried through, neighbour migration, moved-file fingerprint (inode on Linux; not on Windows). |
 | `Import/*` (decode, ThumbnailCache, FramePipeline, disk cache) | host `thumbnail`/`open` | partial | Decoding is the host's (LibRaw / raster). Thumbnails cached in memory per folder; no disk cache. |

@@ -8,8 +8,8 @@ namespace spk {
 inline const char* windows_unported_error(bool di, bool latitude, bool mask,
                                          bool overscan, bool date) {
     if (di) return "digital intermediate is not implemented by the Windows Vulkan backend yet";
-    if (latitude) return "scene latitude mapping is not implemented by the Windows Vulkan backend yet";
-    if (mask) return "contrast mask is not implemented by the Windows Vulkan backend yet";
+    (void)latitude;  // Implemented by the Vulkan scene-latitude kernel.
+    (void)mask;      // Implemented by the portable analysis and Vulkan kernels.
     if (overscan) return "overscan is not implemented by the Windows Vulkan backend yet";
     if (date) return "date imprint is not implemented by the Windows Vulkan backend yet";
     return nullptr;

@@ -34,7 +34,11 @@
 #include <cstdlib>
 #include <cstring>
 
+#ifdef __APPLE__
 #include <dispatch/dispatch.h>
+#else
+#include <thread>
+#endif
 
 #include "pipeline.hpp"
 
@@ -100,9 +104,26 @@ void box(const std::vector<double>& in, std::vector<double>& out, uint32_t w, ui
 // 0.03 and ~600 of 631 at 0.093.
 template <class F>
 void for_each_line(uint32_t lines, F&& fn) {
+#ifdef __APPLE__
     struct Ctx { F* fn; } ctx{&fn};
     dispatch_apply_f(lines, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), &ctx,
                      [](void* c, size_t line) { (*static_cast<Ctx*>(c)->fn)(uint32_t(line)); });
+#else
+    // Each line owns its outputs and sums in the original order. Bounded
+    // static partitions preserve the serial/GCD result without Apple APIs.
+    const uint32_t workers = std::min(lines, std::min(8u, std::max(1u, std::thread::hardware_concurrency())));
+    if (workers <= 1 || lines < 32) {
+        for (uint32_t line = 0; line < lines; ++line) fn(line);
+        return;
+    }
+    std::vector<std::jthread> threads;
+    threads.reserve(workers);
+    for (uint32_t worker = 0; worker < workers; ++worker) {
+        threads.emplace_back([&, worker] {
+            for (uint32_t line = worker; line < lines; line += workers) fn(line);
+        });
+    }
+#endif
 }
 
 void gaussian(const std::vector<double>& in, std::vector<double>& out, uint32_t w, uint32_t h,

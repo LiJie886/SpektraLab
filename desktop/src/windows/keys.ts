@@ -8,7 +8,7 @@
 // characters, arrows and delete to a focused editable element. Ctrl/Alt
 // combinations and Return/Enter/Esc/Tab are not typing keys.
 
-import { setGeometry, selectRelative, setOriginal, setTool, toggleCompare, undo, redo, zoomStep, zoomTo, zoomToFit, currentFitZoom, copySettings, pasteSettings, selectAllFrames, sessionStore, setPages } from '../state/session';
+import { cancelWhiteBalancePick, setGeometry, selectRelative, setOriginal, setTool, toggleCompare, undo, redo, zoomStep, zoomTo, zoomToFit, currentFitZoom, copySettings, pasteSettings, selectAllFrames, sessionStore, setPages } from '../state/session';
 import { turned } from '@shared/geometry';
 import { openDialog, openExport, restartHost } from './actions';
 import { settingsStore } from '../state/settings';
@@ -89,6 +89,7 @@ export function shortcutTable(): Record<string, Action> {
     arrowright: () => selectRelative(1),
     escape: () => {
       const s = sessionStore.getState();
+      if (s.whiteBalancePicking || s.whiteBalanceSampling) { cancelWhiteBalancePick(); return; }
       if (s.exportOpen && !s.batchExporting) setPages({ exportOpen: false });
       else if (s.settingsOpen) setPages({ settingsOpen: false });
       else if (s.aboutOpen) setPages({ aboutOpen: false });

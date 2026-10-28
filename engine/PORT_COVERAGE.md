@@ -1,5 +1,13 @@
 # Engine coverage on Linux / Windows (Vulkan) vs macOS (Metal)
 
+**2026-10-28 update:** scene latitude mapping and contrast mask now run on
+Vulkan. `spk_vulkan_tone` compares all three new kernels with independent
+float64 references; `spk_windows_feature_boundaries` verifies visible changes,
+negative-cache invalidation/reuse and exact bypass restoration. These gates
+passed on Windows using SwiftShader; the kernel gate also passed on Intel UHD.
+Whole-image Metal parity and broad camera/GPU acceptance remain unverified.
+See [the feature validation notes](../desktop/docs/windows-feature-update.md).
+
 The owner's question: *does the engine cover everything in the API spec over
 C++ and Vulkan on the Windows branch?* This table answers it entry point by
 entry point, field group by field group, kernel by kernel. It is kept current
@@ -9,13 +17,13 @@ Two columns of status:
 
 - **Windows_Port (28a9d7c)** -- the state the clean textual merge of
   `origin/Windows_Port` onto main 1.3.1 left (before any Linux work).
-- **Now** -- this branch, as last updated (date in the heading of §5).
+- **Now** -- this branch; 2026-10-28 tone updates are marked explicitly.
 
 Status words:
 
 | word | means |
 |---|---|
-| **tested** | implemented, and a test on this branch exercises it on lavapipe (named) |
+| **tested** | implemented, with a named gate/device; historical unqualified entries are lavapipe |
 | **untested** | implemented, compiles and links, no test exercises it here |
 | **refused** | the engine rejects the request by name (`SPK_ERR_USER`, message names the feature); capabilities list it under `backend.unsupported_features` |
 | **missing** | absent; a call would fail or the feature is silently not there |
@@ -44,8 +52,8 @@ commits.
 | `spk_solve` | untested | tested (host smoke `solve`) | portable (setup only) |
 | `spk_render` (live/preview/full) | tested (Windows) | tested (`spk_windows_c_abi`) | |
 | `spk_reprint` | tested (Windows) | tested (host smoke: `reprinted: true` after a print-side delta) | |
-| `spk_contrast_mask_field` | refused | refused | RFC-024, see §2 |
-| `spk_scene_latitude` (analysis) | tested (Windows) | tested (host smoke) | the *analysis* runs; *applying* the mapping is refused |
+| `spk_contrast_mask_field` | refused | tested (Windows/SwiftShader) | RFC-024 analysis returns the field without changing the next print |
+| `spk_scene_latitude` (analysis) | tested (Windows) | tested (host smoke) | read-only analysis; its resolved mapping can now be applied |
 | `spk_overscan_geometry` | missing (link error) | tested: returns `{"valid":false}` | the merge left the symbol undefined; stubbed so the engine links |
 | `spk_print_lut_catalog` / `spk_print_lut_table` | tested (Windows) | tested (host smoke `export_cube`) | portable core |
 | `spk_preview_stock_lut` | tested (Windows) | tested (host smoke) | `spk_lut3d_trilinear` |
@@ -61,8 +69,8 @@ commits.
 | section | fields | Windows_Port | Now |
 |---|---|---|---|
 | §1–§10 core render, tiers, reprint, live-mutable set | every field in `params_schema` predating RFC-024 | implemented; whole-image Metal parity unverified | same |
-| §11 contrast mask (RFC-024) | `contrast_mask_{active,highlights,shadows,core,scale,scheme}` | **refused** when `active` | refused |
-| §12 Scene Latitude (RFC-023) | `scene_latitude_{active,norm,shadow_knee,highlight_knee,shadow_room,highlight_room,max_lift,rolloff}` | **refused** when `active` (analysis call works) | refused |
+| §11 contrast mask (RFC-024) | `contrast_mask_{active,highlights,shadows,core,scale,scheme}` | **refused** when `active` | tested (2026-10-28, Windows/SwiftShader) |
+| §12 Scene Latitude (RFC-023) | `scene_latitude_{active,norm,shadow_knee,highlight_knee,shadow_room,highlight_room,max_lift,rolloff}` | **refused** when `active` (analysis call works) | tested (2026-10-28, Windows/SwiftShader) |
 | §13 overscan / film edge (RFC-031/032) | `overscan_{active,mode,format,gate,holes,carrier,edge_text,frame_number,frame_seed,camera_seed,f_number,fog,leaks,pair}` | **refused** when `active` | refused |
 | §13 date back | `date_imprint_{active,text,text_b,data_text,style,corner,placement,size,ev,inset_x,inset_y}` | **refused** when `active` | refused |
 | §14 `filter_shift_scale` | `filter_shift_scale` | implemented (portable `printing.cpp`) | implemented, untested here |
@@ -86,13 +94,14 @@ commits.
 | `spk_cam16ucs_compress` | same | tested | tested |
 | `spk_grain_layers`, `spk_grain_simple`, `spk_lognormal_field`, `spk_grain_layer_one` | same (+ `spk_rng_probe`) | tested | tested (`spk_vulkan_grain`) |
 | `spk_di_encode` (Cineon DI) | **missing** | refused | refused |
-| `spk_mask_reduce`, `spk_mask_epilogue` (contrast mask) | **missing** | refused | refused |
-| `spk_scene_latitude` | **missing** | refused | refused |
+| `spk_mask_reduce`, `spk_mask_epilogue` (contrast mask) | same names | refused | tested (`spk_vulkan_tone`, Windows Intel UHD and SwiftShader) |
+| `spk_scene_latitude` | same name | refused | tested (`spk_vulkan_tone`, Windows Intel UHD and SwiftShader) |
 | `spk_overscan_canvas`, `spk_overscan_add_mask`, `spk_overscan_film_present`, `spk_overscan_light` | **missing** | refused | refused |
 
-Host-side (C++) dependencies of the unported features: `contrast_mask.cpp`
-uses GCD (`dispatch_apply`); `overscan.cpp` uses CoreText/CoreGraphics for the
-edge print and date back, and vImage for a convolution.
+Host-side (C++) dependencies: contrast-mask analysis uses GCD on Apple and
+bounded C++ worker threads elsewhere. The remaining `overscan.cpp` port needs
+CoreText/CoreGraphics replacements for edge/date text and a vImage convolution
+replacement.
 
 ## 4. What main added after 61bfc49 that Vulkan lacks
 
@@ -102,16 +111,16 @@ edge print and date back, and vImage for a convolution.
 |---|---|---|
 | 9fa3b0d | anti-halation switch, highlight boost | portable (existing kernels) |
 | 2108544, 4a9ea54, 122c5fb, 4767b48, a2f7acb, abc55d5, 8179327, 9cc53c2, 3fe47b5, 079ec29, 25fe66f, b97b7fa, e985110, 75d8eb5, da9ae19 | film edge / overscan: frame number, panoramic formats, carrier, half-frame pair, perforation softness, Fujifilm/Kodak edge print | refused (overscan) |
-| abc55d5, 079ec29 | a pair's second Scene Placement | refused (scene latitude) |
+| abc55d5, 079ec29 | a pair's second Scene Placement | mapping kernel supports the second curve; pair composition/UI remain unavailable |
 | 3ec73b2 | date back: date + shooting data, date on 120 | refused (date imprint) |
 | f8223db | Enlarger filters move the print | portable (`printing.cpp`) |
 
 The merge is textual; semantic reconciliation of `pipeline.cpp`/`engine.cpp`
 between the two lines is verified only by the CTests named above.
 
-## 5. Current state (2026-10-06)
+## 5. Prior validation (2026-10-06)
 
-**The five refused features stay refused, by the owner's decision**
+**Historical scope: the five refused features stayed refused, by the owner's decision**
 (2026-10-06); `engine/PORT_PLAN.md` is the handoff for porting them.
 Everything else in the API spec runs on Vulkan.
 

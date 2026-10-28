@@ -1,5 +1,15 @@
 # desktop/ — working notes (frontend worker)
 
+## Status (2026-10-28)
+
+Four Windows/Linux additions: RAW sensor white-balance picker, persisted
+pointer filmstrip reorder, fitted scene latitude mapping and explicit
+contrast-mask controls. The real host now implements the two Vulkan tone
+features and reports them available. See
+[`docs/windows-feature-update.md`](docs/windows-feature-update.md) for behavior,
+validation, hardware limitations and remaining packaging work. Earlier notes
+below record the original port and are not the current feature checklist.
+
 Running log for whoever picks this up next (a restarted worker or a human).
 Newest state first in each list. Read with `git log --oneline -20 -- desktop`.
 

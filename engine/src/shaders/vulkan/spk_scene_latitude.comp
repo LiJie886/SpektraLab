@@ -1,0 +1,77 @@
+#version 450
+// RFC-023: pre-film stop-domain gain, same 19-float parameter layout as
+// scene_latitude.metal, including the optional second frame and strip row0.
+layout(local_size_x = 256) in;
+layout(set = 0, binding = 0, std430) readonly buffer RGB { float value[]; }
+rgb;
+layout(set = 0, binding = 1, std430) readonly buffer Params { float value[]; }
+p;
+layout(set = 0, binding = 2, std430) readonly buffer Count { uint value[]; }
+n;
+layout(set = 0, binding = 3, std430) writeonly buffer Output { float value[]; }
+output_data;
+uint spk_global_index() {
+    return gl_GlobalInvocationID.y * (gl_NumWorkGroups.x * gl_WorkGroupSize.x) +
+           gl_GlobalInvocationID.x;
+}
+float departure(float d, float h, float m) {
+    if (!(d > 0.0))
+        return 0.0;
+    if (m == 2.0) {
+        float r = sqrt(h * h + d * d);
+        return -(d * d * d) / (r * (h + r));
+    }
+    if (m == 1.0)
+        return -(d * d) / (h + d);
+    return d * (h / pow(pow(h, m) + pow(d, m), 1.0 / m) - 1.0);
+}
+void main() {
+    uint i = spk_global_index();
+    if (i >= n.value[0])
+        return;
+    float r = rgb.value[3u * i], g = rgb.value[3u * i + 1u], b = rgb.value[3u * i + 2u];
+    precise float cr = max(r, 0.0), cg = max(g, 0.0), cb = max(b, 0.0), v;
+    uint norm = uint(p.value[6]);
+    // GLSL min/max are permitted to select the numeric operand when the other
+    // operand is NaN. Preserve the Metal/reference contract that a NaN norm
+    // bypasses mapping, instead of silently turning a NaN channel into zero.
+    if (isnan(r) || isnan(g) || isnan(b))
+        v = uintBitsToFloat(0x7fc00000u);
+    else if (norm == 1u)
+        v = p.value[7] * cr + p.value[8] * cg + p.value[9] * cb;
+    else if (norm == 2u)
+        v = max(cr, max(cg, cb));
+    else {
+        precise float s2 = cr * cr + cg * cg + cb * cb;
+        v = s2 > 0.0 ? (cr * cr * cr + cg * cg * cg + cb * cb * cb) / s2 : 0.0;
+    }
+    precise float k = 1.0;
+    if (v > 0.0 && !isnan(v) && !isinf(v)) {
+        float nr = p.value[10], e = clamp(log2(max(v, nr * exp2(-24.0)) / nr), -24.0, 24.0),
+              d = 0.0;
+        float kh = p.value[0], hh = p.value[1], ks = p.value[2], hs = p.value[3];
+        if (p.value[13] > 0.0) {
+            uint w = uint(p.value[11]), h = uint(p.value[12]);
+            float along = w >= h ? (float(i % w) + 0.5) / float(w)
+                                 : (float(i / w) + p.value[18] + 0.5) / float(h);
+            if (along >= p.value[13]) {
+                kh = p.value[14];
+                hh = p.value[15];
+                ks = p.value[16];
+                hs = p.value[17];
+            }
+        }
+        if (hh > 0.0 && e > kh)
+            d = departure(e - kh, hh, p.value[4]);
+        else if (hs > 0.0 && e < ks)
+            d = -departure(ks - e, hs, p.value[4]);
+        if (d > 0.0) {
+            float l = p.value[5];
+            d = d * l / sqrt(l * l + d * d);
+        }
+        k = clamp(exp2(d), exp2(-30.0), exp2(30.0));
+    }
+    output_data.value[3u * i] = r * k;
+    output_data.value[3u * i + 1u] = g * k;
+    output_data.value[3u * i + 2u] = b * k;
+}

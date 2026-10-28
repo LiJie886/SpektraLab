@@ -45,11 +45,12 @@ add_library(spektralab_pipeline OBJECT
     src/pipeline/engine.cpp
     src/pipeline/pipeline.cpp
     src/pipeline/scene_latitude.cpp
+    src/pipeline/contrast_mask.cpp
 )
 set_target_properties(spektralab_pipeline PROPERTIES POSITION_INDEPENDENT_CODE ON)
 if(APPLE)
     target_sources(spektralab_pipeline PRIVATE
-        src/pipeline/contrast_mask.cpp src/pipeline/overscan.cpp)
+        src/pipeline/overscan.cpp)
 else()
     target_sources(spektralab_pipeline PRIVATE src/pipeline/windows_unported.cpp)
 endif()
@@ -60,18 +61,21 @@ target_include_directories(spektralab_pipeline PRIVATE
 )
 
 if(BUILD_TESTING)
+    # Narrow main(argc, argv) receives ANSI on Windows. Relative test paths
+    # avoid lossy command-line conversion in checkouts with non-ASCII names.
+    file(RELATIVE_PATH test_source_resources "${CMAKE_CURRENT_BINARY_DIR}" "${CMAKE_CURRENT_SOURCE_DIR}/resources")
     add_executable(spk_dump_json tests/dump_json.cpp)
     target_link_libraries(spk_dump_json PRIVATE spektralab_core)
     add_test(NAME spk_core_schema
-        COMMAND spk_dump_json "${CMAKE_CURRENT_SOURCE_DIR}/resources")
+        COMMAND spk_dump_json "${test_source_resources}")
+    set_tests_properties(spk_core_schema PROPERTIES WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
 
     add_executable(spk_dump_setup tests/dump_setup.cpp)
     target_link_libraries(spk_dump_setup PRIVATE spektralab_core)
     target_include_directories(spk_dump_setup PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/tests")
     add_test(NAME spk_core_setup
-        COMMAND spk_dump_setup "${CMAKE_CURRENT_SOURCE_DIR}/resources"
-                "${CMAKE_CURRENT_BINARY_DIR}/setup.dat"
-                "${CMAKE_CURRENT_BINARY_DIR}/setup.idx")
+        COMMAND spk_dump_setup "${test_source_resources}" setup.dat setup.idx)
+    set_tests_properties(spk_core_setup PROPERTIES WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
 endif()
 
 if(NOT APPLE)
@@ -115,6 +119,7 @@ if(NOT APPLE)
             spk_reduce_max spk_boost spk_bw_correct spk_edr spk_cctf_decode
             spk_zoom_bilinear_mirror spk_geometry_resample_df
             spk_lut3d_trilinear spk_di_normalise
+            spk_scene_latitude spk_mask_reduce spk_mask_epilogue
             CACHE INTERNAL "")
         set(vulkan_spirv)
         file(GLOB vulkan_includes "${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/vulkan/*.glsl")
@@ -197,8 +202,8 @@ if(NOT APPLE)
                     add_executable(spk_image_writer_test tests/image_writer_test.cpp)
                     target_link_libraries(spk_image_writer_test PRIVATE spk_image_io)
                     add_test(NAME spk_image_writer COMMAND spk_image_writer_test
-                        "${CMAKE_CURRENT_SOURCE_DIR}/resources/io/sRGB.icc"
-                        "${CMAKE_CURRENT_BINARY_DIR}/writer-test")
+                        "${test_source_resources}/io/sRGB.icc" writer-test)
+                    set_tests_properties(spk_image_writer PROPERTIES WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
                 endif()
                 add_executable(spk_raw_decoder_errors tests/raw_decoder_errors.cpp)
                 target_link_libraries(spk_raw_decoder_errors PRIVATE spk_image_io)
@@ -242,9 +247,10 @@ if(NOT APPLE)
             target_link_libraries(spk_vulkan_smoke PRIVATE spektralab_engine)
             add_dependencies(spk_vulkan_smoke spektralab_vulkan_resources)
             add_test(NAME spk_vulkan_smoke
-                COMMAND spk_vulkan_smoke "${vulkan_resource_dir}")
+                COMMAND spk_vulkan_smoke resources)
+            set_tests_properties(spk_vulkan_smoke PROPERTIES WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
 
-            foreach(probe grain pointwise resample transfer geometry lut_di)
+            foreach(probe grain pointwise resample transfer geometry lut_di tone)
                 add_executable(spk_vulkan_${probe} tests/gpu_vulkan_${probe}.cpp)
                 target_include_directories(spk_vulkan_${probe} PRIVATE
                     "${CMAKE_CURRENT_SOURCE_DIR}/include"
@@ -252,7 +258,8 @@ if(NOT APPLE)
                 target_link_libraries(spk_vulkan_${probe} PRIVATE spektralab_engine)
                 add_dependencies(spk_vulkan_${probe} spektralab_vulkan_resources)
                 add_test(NAME spk_vulkan_${probe}
-                    COMMAND spk_vulkan_${probe} "${vulkan_resource_dir}")
+                    COMMAND spk_vulkan_${probe} resources)
+                set_tests_properties(spk_vulkan_${probe} PROPERTIES WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
             endforeach()
 
             if(SPEKTRALAB_BUILD_TEST_DLL)
@@ -261,7 +268,8 @@ if(NOT APPLE)
                 target_include_directories(spk_windows_feature_boundaries PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
                 target_link_libraries(spk_windows_feature_boundaries PRIVATE spektralab_engine_shared)
                 add_test(NAME spk_windows_feature_boundaries
-                    COMMAND spk_windows_feature_boundaries "${vulkan_resource_dir}")
+                    COMMAND spk_windows_feature_boundaries resources)
+                set_tests_properties(spk_windows_feature_boundaries PROPERTIES WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
 
                 add_executable(spk_render_fixture tests/render_fixture.cpp)
                 target_compile_features(spk_render_fixture PRIVATE cxx_std_20)
@@ -271,11 +279,9 @@ if(NOT APPLE)
                 configure_file(tests/fixtures/windows/abi_probe.f32 fixtures/abi_probe.f32 COPYONLY)
                 configure_file(tests/fixtures/windows/abi_probe_params.json fixtures/abi_probe_params.json COPYONLY)
                 add_test(NAME spk_windows_c_abi
-                    COMMAND spk_render_fixture "${vulkan_resource_dir}"
-                        "${CMAKE_CURRENT_BINARY_DIR}/fixtures/abi_probe.f32" 3 2
-                        "${CMAKE_CURRENT_BINARY_DIR}/fixtures/abi_probe_params.json"
-                        "${CMAKE_CURRENT_BINARY_DIR}/fixtures/abi_probe.rgba16"
-                        "${CMAKE_CURRENT_BINARY_DIR}/fixtures/abi_probe_report.json")
+                    COMMAND spk_render_fixture resources fixtures/abi_probe.f32 3 2
+                        fixtures/abi_probe_params.json fixtures/abi_probe.rgba16 fixtures/abi_probe_report.json)
+                set_tests_properties(spk_windows_c_abi PROPERTIES WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
             endif()
         endif()
     else()

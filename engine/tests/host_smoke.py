@@ -231,12 +231,22 @@ def extras(host, sid, path, tmp, label, raw, probe):
     check(h["ok"] and h["result"].get("valid") is False, f"{label}: overscan_geometry (refused feature -> invalid)")
     h, _ = host.call("progress", {"session": sid})
     check(h["ok"] and "pct" in h["result"], f"{label}: progress", h.get("error"))
-    # The five refused features are refused by name, and leave the session usable.
-    for field in ("contrast_mask_active", "scene_latitude_active", "overscan_active", "date_imprint_active",
+    # Remaining unported features are refused without mutating the session.
+    for field in ("overscan_active", "date_imprint_active",
                   "digital_intermediate"):
         h, _ = host.call("set_params", {"session": sid, "delta": {field: True}})
         check(not h["ok"] and h["error"]["code"] == "bad_request" and "not implemented" in h["error"]["message"],
               f"{label}: {field} refused", h.get("error", {}).get("message", "accepted?!"))
+    for delta in ({"scene_latitude_active": True, "scene_latitude_highlight_room": 1,
+                   "scene_latitude_shadow_room": 1},
+                  {"scene_latitude_active": False, "contrast_mask_active": True,
+                   "contrast_mask_highlights": 1, "contrast_mask_shadows": 1}):
+        h, _ = host.call("set_params", {"session": sid, "delta": delta})
+        check(h["ok"], f"{label}: tone feature parameters accepted", h.get("error"))
+        h, px = host.call("render", {"session": sid, "tier": "live", "format": "rgba8"})
+        check(h["ok"] and bool(px), f"{label}: tone feature renders", h.get("error"))
+    h, _ = host.call("set_params", {"session": sid, "delta": {"contrast_mask_active": False}})
+    check(h["ok"], f"{label}: tone feature reset")
     h, _ = host.call("print_lut_catalog")
     stock = sorted(h["result"].keys())[0]
     h, px = host.call("preview_stock_lut", {"session": sid, "print_stock": stock, "tier": "live",

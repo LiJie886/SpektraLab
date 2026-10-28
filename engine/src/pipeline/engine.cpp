@@ -319,8 +319,7 @@ struct spk_engine {
         // These upstream effects still require kernels or Apple services that
         // have not been ported. Defaults stay usable; explicit requests fail.
         Json unported = Json::array();
-        for (const char* feature : {"digital_intermediate", "scene_latitude_mapping",
-                                    "contrast_mask", "overscan", "date_imprint"})
+        for (const char* feature : {"digital_intermediate", "overscan", "date_imprint"})
             unported.push(Json(std::string(feature)));
         backend.set("unsupported_features", std::move(unported));
 #endif
