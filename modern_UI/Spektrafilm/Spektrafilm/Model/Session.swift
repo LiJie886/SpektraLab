@@ -78,7 +78,28 @@ final class Session: CanvasHost {
     var libraryTitle: String = ""
 
     // MARK: the current frame
-    var sidecar = Sidecar()
+    var sidecar = Sidecar() {
+        didSet { if oldValue.noFilm != sidecar.noFilm { applyNoFilm() } }
+    }
+    /// "Don't apply film simulation" (`Sidecar.noFilm`), for the menu.
+    var noFilm: Bool {
+        get { sidecar.noFilm }
+        set { guard newValue != sidecar.noFilm else { return }
+              pushUndo()
+              sidecar.noFilm = newValue
+              if let url = selection, let tex = newValue ? renderer.original : renderer.live {
+                  updateThumbnail(url, from: tex)
+              }
+              scheduleSave() }
+    }
+    /// The canvas and the thumbnail follow the flag: the decode is the
+    /// picture, at the photograph's own size, under the frame's geometry.
+    private func applyNoFilm() {
+        renderer.noFilm = sidecar.noFilm
+        // Without a film edge or the date the print is the decode's shape,
+        // so only the source of Layer 2 changes.
+        if geometryIsInTheNegative { syncFilmEdgeFraming() }
+    }
     /// The half-frame pair on the canvas, when the open item is one (its file
     /// is `selection`), and the layer its section is showing.
     private(set) var pair: HalfFramePair?
@@ -163,8 +184,15 @@ final class Session: CanvasHost {
               sidecar.geometry = newValue
               // Before the canvas is told: whether the engine's frame is cut
               // by this geometry is resolved from it (`dateBack.framing`).
+              let wasFraming = filmEdgeFraming
               resolveFilmEdge()
               renderer.geometry = canvasGeometry
+              // The date alone cuts the frame only once the crop is not the
+              // whole frame, so the first ratio chosen in the tool turns
+              // framing on mid-session (and "Original" turns it off). The
+              // canvas must swap to the decode then, not on the next entry:
+              // left on the print, the whole frame jumped under the crop.
+              if filmEdgeFraming != wasFraming { syncFilmEdgeFraming() }
               // A crop changes the physical scale only if the user has said
               // it should (`physicalAspect`). Off — the default — this is a
               // no-op, and the check is here rather than inside so that the
@@ -408,18 +436,25 @@ final class Session: CanvasHost {
             // picture over the undeveloped decode, and leaving it develops
             // the framing.
             if geometryIsInTheNegative {
-                renderer.showOriginal = showingOriginal || filmEdgeFraming
-                renderer.geometry = canvasGeometry
-                // The viewport follows what is shown: the photograph while
-                // framing, the film canvas after.
-                if let live = renderer.live {
-                    renderer.setLive(live, logical: filmEdgeFraming ? nativeSourceSize
-                                     : filmCanvasLogicalSize(for: live, frame: nativeSourceSize))
-                }
+                syncFilmEdgeFraming()
                 if oldValue == .crop { requestPrint(); markStale() }
             }
             renderer.needsDraw?()
         }
+    }
+    /// Show what the crop tool frames under a film edge or the date: the
+    /// undeveloped decode while framing, the film canvas otherwise, with the
+    /// viewport expressed against whichever it is.
+    private func syncFilmEdgeFraming() {
+        renderer.showOriginal = showingOriginal || filmEdgeFraming
+        renderer.geometry = canvasGeometry
+        if let live = renderer.live {
+            renderer.setLive(live, logical: filmEdgeFraming || sidecar.noFilm ? nativeSourceSize
+                             : filmCanvasLogicalSize(for: live, frame: nativeSourceSize))
+        }
+        // The frame the view is expressed against may have just changed
+        // shape; in the tool the view is locked to the whole photograph.
+        renderer.fitRotatedPhoto()
     }
     /// The crop as it was when the crop tool was entered. See `cancelCrop`.
     private var cropEntryGeometry: Geometry?
@@ -2434,7 +2469,7 @@ final class Session: CanvasHost {
         )
         // The frame's own size, and only when it is known: passing nil leaves
         // whatever the decode established (D4).
-        renderer.setLive(tex, logical: scheduler.sent.cutsFrame
+        renderer.setLive(tex, logical: scheduler.sent.cutsFrame && !sidecar.noFilm
                          ? filmCanvasLogicalSize(for: tex, frame: nativeSourceSize) : nativeSourceSize)
         filmCanvasOn = scheduler.sent.cutsFrame ? url : nil
         // This print is at the **preview resolution**. For a frame bigger than
@@ -2449,7 +2484,7 @@ final class Session: CanvasHost {
         frameStates[url] = .processed
         sidecar.state = .processed
         scheduleSave()
-        updateThumbnail(url, from: tex)
+        updateThumbnail(url, from: sidecar.noFilm ? (renderer.original ?? tex) : tex)
         scheduleLatitudeRefresh()
         resolvePendingPlacement()
         if firstPrint { sampleMemory("first_print") }
