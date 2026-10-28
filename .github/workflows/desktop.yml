@@ -1,14 +1,11 @@
-# The Linux / Windows desktop app: engine + host, the Tauri frontend, installers.
+# Windows desktop app: engine + host, the Tauri frontend and NSIS installer.
 #
 # build.yml stays the macOS gate. This one covers what the port added:
 #
-#   engine-linux          CMake + CTest on lavapipe (Mesa's CPU Vulkan), then
-#                         the host smoke test against the staged host.
 #   engine-windows-cross  spektralab-host.exe cross-built with MinGW-w64, and
 #                         the same smoke test under wine (winevulkan -> lavapipe).
 #   desktop-checks        typecheck, eslint, vitest, cargo test, Playwright
 #                         (Chromium against the in-page mock host).
-#   package-linux         .deb + AppImage with the Linux host inside.
 #   package-windows       the NSIS installer, built natively on Windows around
 #                         the cross-built host; then installed silently and
 #                         the installed host asked `hello` on a real Windows.
@@ -20,7 +17,7 @@
 # engine/LINUX_WINDOWS.md and engine/PORT_COVERAGE.md say what was verified
 # by hand beyond this.
 
-name: Desktop (Linux, Windows)
+name: Desktop (Windows)
 
 on:
   push:
@@ -43,42 +40,6 @@ env:
     libxdo-dev libssl-dev patchelf file build-essential
 
 jobs:
-  engine-linux:
-    name: Engine + host (Linux, lavapipe)
-    runs-on: ubuntu-24.04
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Toolchain and Mesa's CPU Vulkan
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            build-essential cmake ninja-build glslang-tools \
-            libvulkan1 mesa-vulkan-drivers vulkan-tools python3
-
-      - name: Vulkan device
-        run: vulkaninfo --summary
-
-      # LibRaw 0.22.2 + Vulkan-Headers, pinned and checksum-verified by the script.
-      - uses: actions/cache@v4
-        with:
-          path: build/deps
-          key: engine-deps-${{ runner.os }}-${{ hashFiles('engine/setup-deps.sh', 'engine/setup-libraw.sh') }}
-
-      - name: Build, CTest, host smoke
-        run: engine/build-linux.sh --test
-
-      # Artifacts drop the executable bit; carry the staged host as a tarball.
-      - name: Pack the staged host
-        run: tar -C build -czf host-linux-x64.tgz host-linux-x64
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: host-linux-x64
-          path: host-linux-x64.tgz
-          retention-days: 14
-
   engine-windows-cross:
     name: Engine + host (Windows x64, cross-built)
     runs-on: ubuntu-24.04
@@ -116,11 +77,13 @@ jobs:
       - name: Pack the staged host
         run: tar -C build -czf host-win-x64.tgz host-win-x64
 
-      - uses: actions/upload-artifact@v4
+      # The intermediate host is passed through the run-scoped cache so
+      # only the finished installer is listed under workflow artifacts.
+      - uses: actions/cache/save@v4
         with:
-          name: host-win-x64
           path: host-win-x64.tgz
-          retention-days: 14
+          key: windows-host-${{ github.run_id }}-${{ github.sha }}
+          enableCrossOsArchive: true
 
   desktop-checks:
     name: Frontend checks
@@ -168,59 +131,6 @@ jobs:
           npx playwright install --with-deps chromium
           npm run test:e2e
 
-  package-linux:
-    name: Package (Linux .deb + AppImage)
-    needs: [engine-linux, desktop-checks]
-    runs-on: ubuntu-24.04
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Tauri build dependencies
-        run: |
-          sudo apt-get update
-          # shellcheck disable=SC2086 # the list is meant to split into words
-          sudo apt-get install -y --no-install-recommends $TAURI_APT
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: desktop/package-lock.json
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: desktop/src-tauri
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: host-linux-x64
-
-      - name: Unpack the staged host
-        run: mkdir -p build && tar -C build -xzf host-linux-x64.tgz
-
-      - name: npm ci
-        working-directory: desktop
-        run: npm ci
-
-      # linuxdeploy is itself an AppImage; hosted runners have no FUSE 2.
-      - name: Build the packages
-        working-directory: desktop
-        env:
-          APPIMAGE_EXTRACT_AND_RUN: '1'
-        run: node scripts/package.mjs linux
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: spektralab-linux-x64
-          path: |
-            desktop/release/linux/*.deb
-            desktop/release/linux/*.AppImage
-          if-no-files-found: error
-          retention-days: 14
-
   package-windows:
     name: Package (Windows NSIS installer)
     needs: [engine-windows-cross, desktop-checks]
@@ -241,9 +151,14 @@ jobs:
         with:
           workspaces: desktop/src-tauri
 
-      - uses: actions/download-artifact@v4
+      - name: Restore the staged Windows host
+        id: host-cache
+        uses: actions/cache/restore@v4
         with:
-          name: host-win-x64
+          path: host-win-x64.tgz
+          key: windows-host-${{ github.run_id }}-${{ github.sha }}
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
 
       - name: Unpack the staged host
         shell: bash
