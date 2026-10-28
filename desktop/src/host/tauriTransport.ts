@@ -14,6 +14,9 @@ function unpack(method: string, buf: ArrayBuffer): Reply {
 }
 
 export function tauriTransport(): Transport {
+  // Register the event listener before reading the initial state: otherwise
+  // the host can become ready between the state read and listener setup.
+  let stateListenerReady: Promise<unknown> = Promise.resolve();
   return {
     kind: 'tauri',
     async request(method, params, opts: RequestOptions = {}) {
@@ -25,9 +28,13 @@ export function tauriTransport(): Transport {
       const buf = await invoke<ArrayBuffer>('host_request', { method, params, timeoutMs: opts.timeoutMs });
       return unpack(method, buf);
     },
-    state: () => invoke<HostState>('host_state'),
+    state: async () => {
+      await stateListenerReady;
+      return invoke<HostState>('host_state');
+    },
     onState(cb) {
       const un = listen<HostState>('host-state', (e) => cb(e.payload));
+      stateListenerReady = un;
       return () => void un.then((f) => f());
     },
     onEvent(cb) {

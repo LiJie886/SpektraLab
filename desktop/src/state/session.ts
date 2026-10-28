@@ -1018,9 +1018,16 @@ function takeHostState(st: HostState) {
 }
 
 export async function boot() {
-  host().onState(takeHostState);
+  let hostUpdates = 0;
+  host().onState((state) => {
+    hostUpdates++;
+    takeHostState(state);
+  });
   void loadCatalog().then((catalog) => set({ catalog }));
-  takeHostState(await host().state());
+  const beforeRead = hostUpdates;
+  const state = await host().state();
+  // A newer event may arrive while the initial state request is in flight.
+  if (hostUpdates === beforeRead) takeHostState(state);
   platform().onOpenPaths((paths) => void openPaths(paths));
   platform().onDrop((paths) => void openPaths(paths));
   const launch = await platform().takeLaunchPaths();
