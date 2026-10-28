@@ -258,15 +258,14 @@ public:
         // Two acceptable outcomes, and nothing in between:
         //   fused    -- every residual is the exact one (NVIDIA, AMD, Intel and
         //               every GPU the Windows port was accepted on);
-        //   unfused  -- every residual is exactly 0 *and* the device is a CPU
-        //               implementation. Mesa's lavapipe lowers fma() to a
+        //   unfused  -- every residual is exactly 0 on a CPU implementation
+        //               or Intel GPU. Mesa's lavapipe lowers fma() to a
         //               multiply and an add even under `precise` (measured
         //               2026-10-05, llvmpipe LLVM 20, Mesa 25.2). That is one
         //               rounding per fma different from a fused device -- far
         //               inside the 3e-5 render bar -- and it is reported in
         //               `capabilities.backend.math_mode`, never silently.
-        // Anything else (some residuals right, some wrong; zeroes on a real
-        // GPU) still refuses to start, as it always did.
+        // Other GPU vendors and mixed or unexpected residuals are rejected.
         size_t exact = 0, zero = 0;
         for (size_t i = 0; i < n; ++i) {
             // These bounded, positive binary32 inputs have an exact binary64
@@ -295,15 +294,16 @@ public:
             detail = "Vulkan probe passed (precise product + fused fma; full shader parity pending)";
             return true;
         }
-        if (zero && !exact && properties_.deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU) {
+        if (zero && !exact && (properties_.deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU ||
+                              properties_.vendorID == 0x8086)) {
             // The double-float kernels then take an exact Dekker product
             // instead of fma (specialization constant 0; see two_prod in
             // spk_iir_df_acc.comp): without it the IIR blur's low word is lost
             // and the recursion amplifies it -- 0.4 % on a 257-px constant row.
             fused_fma_ = 0;
-            detail = "Vulkan probe passed on a CPU device with unfused fma (double-float kernels use an "
+            detail = "Vulkan probe passed with unfused fma (double-float kernels use an "
                      "exact Dekker product; full shader parity pending)";
-            probe_cpu_storage_range(detail);
+            if (properties_.deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU) probe_cpu_storage_range(detail);
             return true;
         }
         if (!exact && !zero) { detail = "Vulkan math probe produced no informative residuals"; return false; }

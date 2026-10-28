@@ -15,7 +15,10 @@ namespace spk {
 
 #ifdef _WIN32
 inline std::filesystem::path file_path(const std::string& utf8) {
-    return std::filesystem::path(std::u8string(utf8.begin(), utf8.end()));
+    // Verbatim Windows paths (\\\\?\\) do not accept forward slashes, while
+    // resource callers append components with '/'. Normalize at the boundary.
+    auto path = std::filesystem::path(std::u8string(utf8.begin(), utf8.end()));
+    return path.make_preferred();
 }
 #else
 inline const std::string& file_path(const std::string& utf8) { return utf8; }

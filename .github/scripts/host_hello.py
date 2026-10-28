@@ -59,6 +59,8 @@ def main():
             sys.exit(f"hello failed: {hello}")
         result = hello["result"]
         backend = result.get("backend", {})
+        if str(backend.get("error", "")).startswith("cannot open "):
+            sys.exit(f"engine resource could not be opened: {backend['error']}")
         print(f"protocol {result.get('protocol')}, host {result.get('host_version')}")
         print(f"backend: {json.dumps(backend)}")
         if result.get("protocol") != 1:

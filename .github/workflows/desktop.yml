@@ -24,7 +24,7 @@ name: Desktop (Linux, Windows)
 
 on:
   push:
-    branches: [main, Windows_Linux, 'claude/**']
+    branches: [main, Windows_Linux, windows-features, 'claude/**']
   pull_request:
   workflow_dispatch:
 
@@ -285,6 +285,10 @@ jobs:
           "engine: $($engine.FullName)"
           python .github/scripts/host_hello.py --host $hostExe.FullName --resources $engine.FullName
           if ($LASTEXITCODE -ne 0) { throw "installed host failed hello" }
+          # Tauri can supply a verbatim Windows path (\\?\); exercise that
+          # exact form because app startup uses it for installed resources.
+          python .github/scripts/host_hello.py --host $hostExe.FullName --resources "\\?\$($engine.FullName)"
+          if ($LASTEXITCODE -ne 0) { throw "installed host failed with verbatim resource path" }
 
       - uses: actions/upload-artifact@v4
         with:
